@@ -12,4 +12,8 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo BUILD SUCCESS
-cd build && test_rom_reader.exe
+echo Running test_rom_reader...
+build\test_rom_reader.exe
+echo Running test_snr_vm...
+build\test_snr_vm.exe
+echo All tests complete.
