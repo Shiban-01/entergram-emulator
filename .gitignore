@@ -1,0 +1,46 @@
+# Build artifacts
+*.o
+*.obj
+*.exe
+*.exe~
+*.out
+*.app
+*.app/
+build/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Game data (ROM files are large, don't commit)
+*.rom
+*.nxa
+*.bgm
+*.mp4
+data.rom
+
+# Dependencies (downloaded via CMake FetchContent)
+_deps/
+deps/sdl2/
+deps/stb/
+
+# OS metadata
+Thumbs.db
+Desktop.ini

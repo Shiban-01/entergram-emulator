@@ -1,0 +1,2 @@
+// Renderer header
+#pragma once
