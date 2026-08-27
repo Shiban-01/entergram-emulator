@@ -160,7 +160,7 @@ bool VideoPlayer::open(const std::string& file_path) {
         return false;
     }
 
-    impl_->pix_fmt = video_stream->codecpar->format;
+    impl_->pix_fmt = static_cast<enum AVPixelFormat>(video_stream->codecpar->format);
 
     // Allocate frames
     impl_->frame = av_frame_alloc();
