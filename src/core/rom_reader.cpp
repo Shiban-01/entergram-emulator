@@ -1,51 +1,33 @@
 #include "rom_reader.hpp"
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
+#include <cstdio>
+#include <stack>
 
 namespace entergram {
 
-// =============================================================================
-// ROM2 Format Reference (reverse-engineered from Umineko Switch data.rom):
-//
-// Header (32 bytes, INDEX at offset 0x20):
-//   offset 0x00: magic[4] = "ROM2" (0x324D4F52 little-endian)
-//   offset 0x04: version = 0x00010001
-//   offset 0x08: index_length = 2,762,608 bytes (index section size)
-//   offset 0x0C: offset_multiplier = 512 (data offsets in index × this)
-//   offset 0x10-0x1F: padding/reserved
-//
-// Index Section (starts at 0x20):
-//   B-tree directory structure. Each entry is 12 bytes:
-//     name_offset (u32): bit 31 = is_directory flag; lower 31 bits = offset to name string
-//     data_offset   (u32): offset into the data area (× offset_multiplier)
-//     data_size     (u32): file size in bytes (0 for directories)
-//
-// Name Table: Strings stored within the index section,
-// referenced by absolute offset from the start of the index data.
-// =============================================================================
+static constexpr uint32_t INDEX_OFFSET = 0x20;
+static constexpr uint32_t DIRECTORY_OFFSET_MULTIPLIER = 16;
 
 RomReader::RomReader() = default;
-
 RomReader::~RomReader() = default;
 
 bool RomReader::open(const std::string& rom_path) {
     rom_path_ = rom_path;
 
-    // Read the entire file to validate header (we only need the first 32 bytes)
     std::ifstream f(rom_path, std::ios::binary);
     if (!f.is_open()) {
         return false;
     }
 
-    // Read 16 bytes (we only need to validate magic + basic fields)
-    f.read(reinterpret_cast<char*>(&header_), sizeof(uint32_t) * 4);
+    f.read(reinterpret_cast<char*>(&header_), sizeof(RomHeader));
     if (!f) {
         return false;
     }
 
     f.close();
 
-    // Validate magic
     uint32_t magic_u32;
     std::memcpy(&magic_u32, header_.magic, 4);
     if (magic_u32 != RomHeader::EXPECTED_MAGIC) {
@@ -56,20 +38,18 @@ bool RomReader::open(const std::string& rom_path) {
 }
 
 bool RomReader::parse() {
-    // Open file for reading
     std::ifstream f(rom_path_, std::ios::binary);
     if (!f.is_open()) {
         return false;
     }
 
-    // Read header
+    // Read the full 32-byte header
     f.read(reinterpret_cast<char*>(&header_), sizeof(RomHeader));
     if (!f) {
         f.close();
         return false;
     }
 
-    // Validate magic
     uint32_t magic_u32;
     std::memcpy(&magic_u32, header_.magic, 4);
     if (magic_u32 != RomHeader::EXPECTED_MAGIC) {
@@ -77,10 +57,9 @@ bool RomReader::parse() {
         return false;
     }
 
-    // Read the entire index section into memory
-    // Index starts at INDEX_OFFSET (0x20), length = header_.index_length
+    // Read the entire index section
     index_data_.resize(header_.index_length);
-    f.seekg(RomHeader::INDEX_OFFSET, std::ios::beg);
+    f.seekg(INDEX_OFFSET, std::ios::beg);
     f.read(reinterpret_cast<char*>(index_data_.data()), header_.index_length);
     if (!f) {
         f.close();
@@ -89,39 +68,141 @@ bool RomReader::parse() {
 
     f.close();
 
-    // Parse root directory
-    root_entry_ = std::make_unique<RomEntry>(
-        parse_directory(index_data_.data(), header_.index_length));
+    printf("  Index loaded: %u bytes\n", header_.index_length);
+    printf("  Parsing root directory...\n");
+    fflush(stdout);
+
+    // Parse root directory iteratively (stack-based to avoid deep recursion)
+    root_entry_ = std::make_unique<RomEntry>();
+    root_entry_->name = "/";
+    root_entry_->is_directory = true;
+    root_entry_->data_offset = 0;
+    root_entry_->data_size = 0;
+
+    // Parse root recursively with a depth limit
+    // Root is at INDEX_OFFSET (0x20), current_dir_offset = INDEX_OFFSET
+    parse_directory_recursive(*root_entry_, INDEX_OFFSET, INDEX_OFFSET, 0);
 
     count_entries(*root_entry_);
 
     return true;
 }
 
-RomEntry RomReader::parse_entry_at(const uint8_t* ptr) const {
+void RomReader::parse_directory_recursive(
+    RomEntry& dir_entry,
+    uint32_t dir_file_offset,
+    uint32_t current_dir_offset,
+    int depth) {
+
+    // Safety: limit recursion depth
+    if (depth > 10) {
+        return;
+    }
+
+    uint32_t rel_dir_offset = dir_file_offset - INDEX_OFFSET;
+    if (rel_dir_offset + 4 > index_data_.size()) {
+        return;
+    }
+
+    // First 4 bytes = entry_count
+    uint32_t entry_count;
+    std::memcpy(&entry_count, index_data_.data() + rel_dir_offset, 4);
+
+    printf("  Parsing dir at 0x%X: %u entries (depth=%d)\n", dir_file_offset, entry_count, depth);
+    fflush(stdout);
+
+    const uint8_t* ptr = index_data_.data() + rel_dir_offset + 4;
+    const uint8_t* end = index_data_.data() + index_data_.size();
+
+    uint32_t entries_remaining = entry_count;
+    while (ptr + 12 <= end && entries_remaining > 0) {
+        // Parse entry
+        uint32_t name_offset_and_flag;
+        std::memcpy(&name_offset_and_flag, ptr, 4);
+        ptr += 4;
+        uint32_t data_offset;
+        std::memcpy(&data_offset, ptr, 4);
+        ptr += 4;
+        uint32_t data_size;
+        std::memcpy(&data_size, ptr, 4);
+        ptr += 12 - 4 - 4; // already advanced 8 bytes
+
+        // Wait, that arithmetic is wrong. Each entry is 12 bytes.
+        // We've read 12 bytes. Reset ptr correctly.
+        ptr = ptr - 12 + 12; // This is wrong, let me recalculate...
+
+        // Actually ptr is already at the right position for the next entry since
+        // we did ptr += 4, ptr += 4, ptr += 4 = 12 bytes total advancement
+        
+        bool is_dir = (name_offset_and_flag & 0x80000000) != 0;
+        uint32_t name_offset = name_offset_and_flag & 0x7FFFFFFF;
+
+        // Skip if name offset is invalid
+        if (name_offset == 0) {
+            entries_remaining--;
+            continue;
+        }
+
+        uint32_t rel_name_offset = current_dir_offset - INDEX_OFFSET + name_offset;
+        std::string name;
+        if (rel_name_offset < index_data_.size()) {
+            const char* name_str = reinterpret_cast<const char*>(index_data_.data() + rel_name_offset);
+            name = name_str;
+        } else {
+            name = "";
+        }
+
+        // Skip . and .. entries
+        if (name == "." || name == "..") {
+            entries_remaining--;
+            continue;
+        }
+
+        RomEntry entry;
+        entry.name = name;
+        entry.data_offset = data_offset;
+        entry.data_size = data_size;
+        entry.is_directory = is_dir;
+
+        if (is_dir) {
+            // Directory: subdirectory entries at data_offset * 16 + INDEX_OFFSET
+            uint32_t sub_file_offset = data_offset * DIRECTORY_OFFSET_MULTIPLIER + INDEX_OFFSET;
+            if (sub_file_offset < INDEX_OFFSET + index_data_.size()) {
+                // Recurse into subdirectory
+                // The current_dir_offset for the subdirectory's children is sub_file_offset
+                parse_directory_recursive(entry, sub_file_offset, sub_file_offset, depth + 1);
+            }
+        }
+
+        dir_entry.children.push_back(std::move(entry));
+        entries_remaining--;
+    }
+}
+
+RomEntry RomReader::parse_entry_at(const uint8_t* ptr, uint32_t current_dir_offset) const {
     RomEntry entry;
 
-    // Read name_offset (u32, little-endian)
     uint32_t name_offset_and_flag;
     std::memcpy(&name_offset_and_flag, ptr, 4);
     ptr += 4;
 
-    // Read data_offset (u32)
     uint32_t data_offset;
     std::memcpy(&data_offset, ptr, 4);
     ptr += 4;
 
-    // Read data_size (u32)
     uint32_t data_size;
     std::memcpy(&data_size, ptr, 4);
 
-    // Extract name
     bool is_dir = (name_offset_and_flag & 0x80000000) != 0;
     uint32_t name_offset = name_offset_and_flag & 0x7FFFFFFF;
 
-    // Names are stored in the index section, referenced by absolute offset
-    const char* name_str = reinterpret_cast<const char*>(index_data_.data() + name_offset);
-    entry.name = name_str;
+    uint32_t rel_name_offset = current_dir_offset - INDEX_OFFSET + name_offset;
+    if (rel_name_offset < index_data_.size()) {
+        const char* name_str = reinterpret_cast<const char*>(index_data_.data() + rel_name_offset);
+        entry.name = name_str;
+    } else {
+        entry.name = "";
+    }
 
     entry.data_offset = data_offset;
     entry.data_size = data_size;
@@ -130,29 +211,37 @@ RomEntry RomReader::parse_entry_at(const uint8_t* ptr) const {
     return entry;
 }
 
-RomEntry RomReader::parse_directory(const uint8_t* data, size_t length) {
+RomEntry RomReader::parse_directory(uint32_t dir_file_offset, uint32_t current_dir_offset) {
     RomEntry dir_entry;
     dir_entry.name = "/";
     dir_entry.is_directory = true;
+    dir_entry.data_offset = 0;
+    dir_entry.data_size = 0;
 
-    const uint8_t* ptr = data;
-    const uint8_t* end = data + length;
+    uint32_t rel_dir_offset = dir_file_offset - INDEX_OFFSET;
+    if (rel_dir_offset + 4 > index_data_.size()) {
+        return dir_entry;
+    }
+
+    const uint8_t* ptr = index_data_.data() + rel_dir_offset + 4;
+    const uint8_t* end = index_data_.data() + index_data_.size();
 
     while (ptr + 12 <= end) {
-        RomEntry entry = parse_entry_at(ptr);
+        RomEntry entry = parse_entry_at(ptr, current_dir_offset);
 
-        // Check for end marker (null name or zero length)
         if (entry.name.empty() || entry.name[0] == '\0') {
             break;
         }
 
+        if (entry.name == "." || entry.name == "..") {
+            ptr += 12;
+            continue;
+        }
+
         if (entry.is_directory) {
-            // Parse subdirectory: entries stored at (data_offset * offset_multiplier)
-            uint64_t sub_offset = (uint64_t)entry.data_offset * header_.offset_multiplier;
-            if (sub_offset < index_data_.size()) {
-                const uint8_t* sub_data = index_data_.data() + sub_offset;
-                size_t sub_length = index_data_.size() - sub_offset;
-                entry = parse_directory(sub_data, sub_length);
+            uint32_t sub_file_offset = entry.data_offset * DIRECTORY_OFFSET_MULTIPLIER + INDEX_OFFSET;
+            if (sub_file_offset < INDEX_OFFSET + index_data_.size()) {
+                entry.children = parse_directory(sub_file_offset, current_dir_offset).children;
             }
         }
 

@@ -33,6 +33,7 @@ struct RomEntry {
     uint32_t data_size;      // Size in bytes (0 for directories)
     bool is_directory;
     std::vector<RomEntry> children;
+    uint32_t _entries_offset; // For directories: offset of subdir entries (× 16)
 
     bool is_file() const { return !is_directory; }
 };
@@ -87,10 +88,11 @@ private:
     size_t total_dirs_ = 0;
 
     // Parse a single 12-byte directory entry
-    RomEntry parse_entry_at(const uint8_t* ptr) const;
+    RomEntry parse_entry_at(const uint8_t* ptr, uint32_t current_dir_offset) const;
 
     // Recursively parse directory entries within the index
-    RomEntry parse_directory(const uint8_t* data, size_t length);
+    RomEntry parse_directory(uint32_t dir_file_offset, uint32_t current_dir_offset);
+    void parse_directory_recursive(RomEntry& dir_entry, uint32_t dir_file_offset, uint32_t current_dir_offset, int depth);
 
     // Read raw data at (data_offset * offset_multiplier)
     std::vector<uint8_t> read_data(uint64_t data_offset, uint32_t data_size) const;

@@ -90,6 +90,7 @@ public:
 
     uint32_t current_address() const { return context_.current_address; }
     bool is_running() const { return context_.running; }
+    size_t script_size() const { return bytecode_.size(); }
     const VmContext& context() const { return context_; }
 
     // Decode/read helpers (public for testing)

@@ -36,8 +36,24 @@ add_executable(test_snr0_parser
 target_include_directories(test_snr0_parser PRIVATE src)
 add_test(NAME Snr0ParserTest COMMAND test_snr0_parser)
 
+add_executable(minimal_test
+    tests/minimal_test.cpp
+    src/core/rom_reader.cpp
+)
+target_include_directories(minimal_test PRIVATE src)
+add_test(NAME MinimalTest COMMAND minimal_test)
+
+add_executable(test_integration
+    tests/test_integration.cpp
+    src/core/rom_reader.cpp
+    src/core/snr_vm.cpp
+    src/core/snr0_parser.cpp
+)
+target_include_directories(test_integration PRIVATE src)
+add_test(NAME IntegrationTest COMMAND test_integration)
+
 # =============================================================================
-# Main executable
+# Main executable (with SDL2 + FFmpeg + OpenGL)
 # =============================================================================
 
 # Find FFmpeg
@@ -47,10 +63,8 @@ find_package(FFMPEG REQUIRED COMPONENTS avcodec avformat swscale avutil)
 # Find SDL2
 find_package(SDL2 REQUIRED)
 
-# OpenGL
+# Find OpenGL
 find_package(OpenGL REQUIRED)
-# On Windows, we need both opengl32 (GL 1.1) and the GL function loader
-# OpenGL 3.3 functions are loaded manually via SDL_GL_GetProcAddress in renderer.cpp
 
 add_executable(entergram_emulator
     src/main.cpp
