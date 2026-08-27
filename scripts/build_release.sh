@@ -7,39 +7,65 @@ set -e
 VERSION=${1:-"0.1.0-beta"}
 BUILD_DIR="build-release"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "Building Entergram Emulator v${VERSION}"
-echo "Project root: ${PROJECT_ROOT}"
+cd "$PROJECT_ROOT"
 
-cd "${PROJECT_ROOT}"
-mkdir -p ${BUILD_DIR}
-cd ${BUILD_DIR}
+# Detect platform
+case "$(uname -s)" in
+    Darwin*)    PLATFORM="macos" ;;
+    Linux*)     PLATFORM="linux" ;;
+    MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+    *)          PLATFORM="unknown" ;;
+esac
 
-# Configure with CMake
-cmake .. -DCMAKE_BUILD_TYPE=Release
+echo "=== Entergram Emulator Release Build v$VERSION ==="
+echo "Platform: $PLATFORM"
+echo "Project root: $PROJECT_ROOT"
 
-# Build
-echo "Compiling..."
-NUM_CPUS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-cmake --build . --config Release -j${NUM_CPUS}
+# Clean previous build
+rm -rf "$BUILD_DIR"
 
-# Package for distribution
-echo "Packaging release..."
-
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    echo "Packaging for Windows..."
-    # Windows packaging (zip)
-    powershell -Command "Compress-Archive -Path entergram_emulator.exe -DestinationPath entergram-emulator-${VERSION}-win64.zip -Force"
-elif [[ "$OSTYPE" == "darwin"* ]]; then
-    echo "Packaging for macOS..."
-    tar czf entergram-emulator-${VERSION}-macos.tar.gz entergram_emulator
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    echo "Packaging for Linux..."
-    tar czf entergram-emulator-${VERSION}-linux.tar.gz entergram_emulator
+# Configure
+echo ""
+echo "--- Configuring (CMake) ---"
+if [ "$PLATFORM" = "windows" ]; then
+    cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -G "Ninja"
 else
-    echo "Unknown OS: $OSTYPE"
-    exit 1
+    cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
 fi
 
-echo "Build complete. Release artifacts in ${BUILD_DIR}/"
+# Build
+echo ""
+echo "--- Building ---"
+cmake --build "$BUILD_DIR" --config Release --parallel
+
+# Package
+echo ""
+echo "--- Packaging ---"
+OUTPUT_DIR="$PROJECT_ROOT/release-$PLATFORM-$VERSION"
+mkdir -p "$OUTPUT_DIR"
+
+# Copy binary
+if [ "$PLATFORM" = "windows" ]; then
+    cp "$BUILD_DIR/entergram_emulator.exe" "$OUTPUT_DIR/"
+    # Copy FFmpeg DLLs if they exist
+    if [ -d "/c/vcpkg/installed/x64-windows/bin" ]; then
+        cp /c/vcpkg/installed/x64-windows/bin/av*.dll "$OUTPUT_DIR/" 2>/dev/null || true
+        cp /c/vcpkg/installed/x64-windows/bin/sw*.dll "$OUTPUT_DIR/" 2>/dev/null || true
+    fi
+else
+    cp "$BUILD_DIR/entergram_emulator" "$OUTPUT_DIR/"
+fi
+
+# Create zip
+echo ""
+echo "--- Creating archive ---"
+cd "$OUTPUT_DIR"
+zip -r "../entergram-emulator-$VERSION-$PLATFORM.zip" . || true
+cd "$PROJECT_ROOT"
+
+echo ""
+echo "=== Build complete! ==="
+echo "Release: $OUTPUT_DIR"
+echo "Archive: $PROJECT_ROOT/entergram-emulator-$VERSION-$PLATFORM.zip"
