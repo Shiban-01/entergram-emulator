@@ -93,6 +93,10 @@ public:
     size_t script_size() const { return bytecode_.size(); }
     const VmContext& context() const { return context_; }
 
+    // Voice playback state
+    bool is_waiting_for_voice() const { return waiting_for_voice_; }
+    bool has_voice_playing() const { return voice_playing_; }
+
     // Decode/read helpers (public for testing)
     SnrInstruction decode_instruction(uint32_t offset) const;
     uint32_t read_u32(uint32_t offset) const;
@@ -100,6 +104,9 @@ public:
 private:
     std::vector<uint8_t> bytecode_;
     VmContext context_;
+
+    bool waiting_for_voice_ = false;
+    bool voice_playing_ = false;
 
     bool execute(const SnrInstruction& instr, SnrVmCallbacks* callbacks);
 };

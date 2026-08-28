@@ -22,6 +22,7 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <cstdio>
 
 #ifdef USE_SDL2
     #include <SDL2/SDL.h>
@@ -48,12 +49,12 @@ enum class GameState {
 // Forward declaration
 class GameEngine;
 
-// Callback handler for SNR VM — bridges VM opcodes to engine methods
+// Callback handler for SNR VM -- bridges VM opcodes to engine methods
 class GameCallbacks : public entergram::SnrVmCallbacks {
 public:
     GameEngine* engine = nullptr;
 
-    void on_voice_play(const std::string& file_name, int volume, int flags) override;
+    void on_voice_play(const std::string& file_name, int volume, int) override;
     void on_voice_stop(int voice_id) override;
     void on_voice_wait(int voice_id) override;
     void on_bgm_play(const std::string& file_name, int volume) override;
@@ -67,7 +68,7 @@ public:
     void on_wait(int frames) override;
 };
 
-// Game engine — coordinates ROM, VM, renderer, video player, and audio
+// Game engine -- coordinates ROM, VM, renderer, video player, and audio
 class GameEngine {
 public:
     GameEngine();
@@ -96,11 +97,15 @@ public:
     void display_text(const std::string& text, const std::string& character_name);
     void wait_frames(int frames);
 
+    // Video
+    bool extract_intro_video();
+    void render_video_frame();
+    void update_video();
+
 private:
     bool load_script(const std::string& script_path);
     void handle_input();
     void render();
-    void update_video();
 
     GameState state_;
     entergram::RomReader rom_;
@@ -113,10 +118,14 @@ private:
     entergram::AudioPlayer audio_player_;
     std::vector<uint8_t> current_script_;
     int wait_frames_remaining_ = 0;
+    std::string intro_video_path_;
+    entergram::Texture video_texture_;
 
 #if WITH_SDL2
     SDL_Window* window_ = nullptr;
     SDL_GLContext gl_context_ = nullptr;
+    int window_w_ = VIRTUAL_WIDTH;
+    int window_h_ = VIRTUAL_HEIGHT;
 #endif
 };
 
@@ -141,7 +150,7 @@ void GameCallbacks::on_movie_play(const std::string& file_name) { if (engine) en
 void GameCallbacks::on_movie_stop() {}
 void GameCallbacks::on_text_display(const std::string& text, const std::string& name) { if (engine) engine->display_text(text, name); }
 void GameCallbacks::on_choice(const std::vector<std::string>& options) { printf("[CHOICE] %zu options\n", options.size()); }
-void GameCallbacks::on_system_call(uint32_t code, const std::string& data) { printf("[SYS] code=0x%x, data=%s\n", code, data.c_str()); }
+void GameCallbacks::on_system_call(uint32_t code, const std::string& data) { printf("[SYS] code=0x%x\n", code); }
 void GameCallbacks::on_wait(int frames) { if (engine) engine->wait_frames(frames); }
 
 bool GameEngine::load_script(const std::string& script_path) {
@@ -158,11 +167,125 @@ bool GameEngine::load_script(const std::string& script_path) {
             return false;
         }
     } else {
-        current_script_ = file->data;
+        // Raw SNR: skip the 16-byte header, use bytecode directly
+        size_t skip = 0;
+        if (file->data.size() >= 4) {
+            std::string magic(reinterpret_cast<const char*>(file->data.data()), 4);
+            if (magic == "SNR " || magic == "SNR0") {
+                skip = 16;  // Skip SNR header
+            }
+        }
+        current_script_ = std::vector<uint8_t>(file->data.begin() + skip, file->data.end());
     }
 
     vm_.load_script(current_script_);
     return true;
+}
+
+bool GameEngine::extract_intro_video() {
+    // Try extracting the intro video from movie/ directory
+    // The intro is sakucs_op.mp4 (151MB) - or a smaller one for testing
+    std::vector<std::string> intro_videos = {
+        "movie/sakucs_op.mp4",
+        "movie/op1.mp4",
+    };
+
+    for (const auto& path : intro_videos) {
+        auto movie = rom_.extract_file(path);
+        if (movie && !movie->data.empty()) {
+            // Use platform-appropriate temp path
+            intro_video_path_ = "intro_movie.mp4";
+
+            std::ofstream f(intro_video_path_, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(movie->data.data()), movie->data.size());
+            f.close();
+
+            std::cout << "Extracted intro video: " << path << " ("
+                      << movie->data.size() / (1024*1024) << " MB)\n";
+
+            if (video_player_.open(intro_video_path_)) {
+                std::cout << "  Video: " << video_player_.width() << "x"
+                          << video_player_.height() << " @ "
+                          << video_player_.frame_rate() << " fps\n";
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void GameEngine::render_video_frame() {
+#if WITH_SDL2
+    // Clear screen and render video texture
+    renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
+
+    // Get current RGBA frame
+    if (video_player_.has_pending_frame()) {
+        auto frame = video_player_.read_frame();
+        if (frame && frame->valid()) {
+            // Upload to texture and render as fullscreen quad
+            video_texture_.upload(frame->width, frame->height, frame->data.data());
+            entergram::Sprite sprite;
+            sprite.x = 0;
+            sprite.y = 0;
+            sprite.width = static_cast<float>(frame->width);
+            sprite.height = static_cast<float>(frame->height);
+            renderer_.render_video(sprite, video_texture_);
+            video_player_.mark_frame_consumed();
+        }
+    }
+
+    SDL_GL_SwapWindow(window_);
+#endif
+}
+
+void GameEngine::update_video() {
+    if (state_ != GameState::IntroVideo) return;
+
+    // If video player has no stream (failed to open), skip to main menu
+    if (!video_player_.has_error() && video_player_.width() == 0 && video_player_.height() == 0) {
+        // No video available, skip to main menu
+        state_ = GameState::MainMenu;
+        printf("No intro video available, going to main menu\n");
+        return;
+    }
+
+    // Calculate video timing for real-time playback
+    static auto video_start = std::chrono::steady_clock::now();
+    if (video_player_.is_eof() && !video_player_.has_pending_frame()) {
+        // Check if we need to drain remaining frames
+        video_player_.read_frame();
+        if (video_player_.has_pending_frame()) {
+            render_video_frame();
+        } else {
+            state_ = GameState::MainMenu;
+            printf("Intro video finished, showing SELECT menu\n");
+            std::remove(intro_video_path_.c_str());
+        }
+        return;
+    }
+
+    // Time-based frame scheduling: only decode a new frame if enough time has passed
+    double fps = video_player_.frame_rate();
+    if (fps <= 0) fps = 30.0;
+    double frame_duration_ms = 1000.0 / fps;
+
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(now - video_start).count();
+
+    // Frame index based on elapsed time
+    int target_frame = static_cast<int>(elapsed_ms / frame_duration_ms);
+
+    if (video_player_.has_pending_frame()) {
+        // Render the buffered frame
+        render_video_frame();
+    } else {
+        // Decode next frame
+        video_player_.read_frame();
+        if (video_player_.has_pending_frame()) {
+            render_video_frame();
+        }
+    }
 }
 
 bool GameEngine::initialize(const std::string& rom_path) {
@@ -202,9 +325,15 @@ bool GameEngine::initialize(const std::string& rom_path) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
+    // Get display bounds for proper window sizing
+    SDL_DisplayMode dm;
+    SDL_GetDesktopDisplayMode(0, &dm);
+    window_w_ = dm.w;
+    window_h_ = dm.h;
+
     window_ = SDL_CreateWindow("Entergram Emulator - Umineko",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        VIRTUAL_WIDTH, VIRTUAL_HEIGHT, SDL_WINDOW_OPENGL);
+        window_w_, window_h_, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 
     if (!window_) {
         std::cerr << "Failed to create window: " << SDL_GetError() << "\n";
@@ -220,12 +349,23 @@ bool GameEngine::initialize(const std::string& rom_path) {
         return false;
     }
 
+    // VSync for smooth video playback
+    SDL_GL_SetSwapInterval(1);
+
     if (!renderer_.initialize()) {
         std::cerr << "Failed to initialize renderer\n";
         return false;
     }
-    renderer_.set_viewport(VIRTUAL_WIDTH, VIRTUAL_HEIGHT);
+    renderer_.set_viewport(window_w_, window_h_);
     audio_player_.initialize();
+
+    // Extract intro video with graceful error handling
+    std::cout << "Extracting intro video...\n";
+    if (!extract_intro_video()) {
+        std::cerr << "WARNING: Cannot extract intro video - skipping intro\n";
+        // Skip intro video, go directly to main menu
+        // The VM will still run and process any MOVIE opcodes later
+    }
 #endif
 
     state_ = GameState::IntroVideo;
@@ -240,6 +380,11 @@ void GameEngine::handle_input() {
             case SDL_QUIT: state_ = GameState::Shutdown; break;
             case SDL_KEYDOWN:
                 if (e.key.keysym.sym == SDLK_ESCAPE) state_ = GameState::Shutdown;
+                if (e.key.keysym.sym == SDLK_SPACE) {
+                    if (state_ == GameState::IntroVideo) {
+                        state_ = GameState::MainMenu;
+                    }
+                }
                 break;
         }
     }
@@ -248,27 +393,16 @@ void GameEngine::handle_input() {
 
 void GameEngine::render() {
 #if WITH_SDL2
-    renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
-    auto render_list = layer_manager_.get_render_list();
-    for (const auto* props : render_list) {
-        // TODO: bind texture and render sprite
-        (void)props;
-    }
-    SDL_GL_SwapWindow(window_);
-#endif
-}
-
-void GameEngine::update_video() {
-    if (state_ != GameState::IntroVideo) return;
-
-    if (auto frame = video_player_.read_frame()) {
-        if (frame && frame->valid()) {
-            video_player_.mark_frame_consumed();
+    // For intro video, frames are rendered in update_video()
+    if (state_ != GameState::IntroVideo) {
+        renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
+        auto render_list = layer_manager_.get_render_list();
+        for (const auto* props : render_list) {
+            (void)props;
         }
-    } else if (video_player_.is_eof()) {
-        state_ = GameState::MainMenu;
-        printf("Intro video finished, showing SELECT menu\n");
+        SDL_GL_SwapWindow(window_);
     }
+#endif
 }
 
 // Game callbacks
@@ -288,8 +422,8 @@ void GameEngine::play_se(const std::string& file_name, int volume) {
 void GameEngine::play_movie(const std::string& file_name) {
     printf("MOVIE: %s\n", file_name.c_str());
     auto movie = rom_.extract_file("movie/" + file_name);
-    if (movie) {
-        std::string temp_path = "/tmp/" + file_name;
+    if (movie && !movie->data.empty()) {
+        std::string temp_path = "movie_temp.mp4";
         std::ofstream f(temp_path, std::ios::binary);
         f.write(reinterpret_cast<const char*>(movie->data.data()), movie->data.size());
         f.close();
@@ -299,6 +433,7 @@ void GameEngine::play_movie(const std::string& file_name) {
                    video_player_.width(), video_player_.height(),
                    video_player_.frame_rate(),
                    movie->data.size() / (1024.0 * 1024.0));
+            state_ = GameState::IntroVideo;
         } else {
             printf("  ERROR: %s\n", video_player_.last_error().c_str());
         }
@@ -324,11 +459,15 @@ int GameEngine::run_sdl() {
 
         switch (state_) {
             case GameState::IntroVideo:
-                vm_.run(&callbacks_);
+                // Run VM in background (processes MOVIEPLAY/SYS callbacks)
+                if (vm_.is_running() && !vm_.is_waiting_for_voice()) {
+                    vm_.step(&callbacks_);
+                }
                 update_video();
                 break;
             case GameState::MainMenu:
                 if (vm_.is_running()) vm_.run(&callbacks_);
+                render();
                 break;
             case GameState::Novel:
                 if (wait_frames_remaining_ > 0) {
@@ -336,6 +475,7 @@ int GameEngine::run_sdl() {
                 } else if (vm_.is_running()) {
                     vm_.step(&callbacks_);
                 }
+                render();
                 break;
             case GameState::Boot:
                 state_ = GameState::IntroVideo;
@@ -343,14 +483,21 @@ int GameEngine::run_sdl() {
             default: break;
         }
 
-        render();
-
         auto elapsed = std::chrono::duration<double, std::milli>(clock::now() - frame_start).count();
         if (elapsed < target_frame_time) {
             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(target_frame_time - elapsed)));
         }
     }
 
+    // Cleanup
+    if (!intro_video_path_.empty()) {
+        std::remove(intro_video_path_.c_str());
+    }
+#if WITH_SDL2
+    if (gl_context_) SDL_GL_DeleteContext(gl_context_);
+    if (window_) SDL_DestroyWindow(window_);
+    SDL_Quit();
+#endif
     return 0;
 }
 #endif
