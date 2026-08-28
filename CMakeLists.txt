@@ -12,7 +12,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 enable_testing()
 
 # =============================================================================
-# Tests
+# Find dependencies
+# =============================================================================
+
+# Find FFmpeg
+list(APPEND CMAKE_MODULE_PATH "C:/vcpkg/installed/x64-windows/share/ffmpeg")
+find_package(FFMPEG REQUIRED COMPONENTS avcodec avformat swscale avutil)
+
+# Find SDL2
+find_package(SDL2 REQUIRED)
+
+# Find OpenGL
+find_package(OpenGL REQUIRED)
+
+# =============================================================================
+# Unit tests (no FFmpeg/SDL2 dependency)
 # =============================================================================
 
 add_executable(test_rom_reader
@@ -43,28 +57,25 @@ add_executable(minimal_test
 target_include_directories(minimal_test PRIVATE src)
 add_test(NAME MinimalTest COMMAND minimal_test)
 
+# =============================================================================
+# Integration test (with FFmpeg video decoding)
+# =============================================================================
+
 add_executable(test_integration
     tests/test_integration.cpp
     src/core/rom_reader.cpp
     src/core/snr_vm.cpp
     src/core/snr0_parser.cpp
+    src/video/player.cpp
 )
 target_include_directories(test_integration PRIVATE src)
+target_include_directories(test_integration PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(test_integration PRIVATE ${FFMPEG_LIBRARIES} SDL2::SDL2 SDL2::SDL2main)
 add_test(NAME IntegrationTest COMMAND test_integration)
 
 # =============================================================================
 # Main executable (with SDL2 + FFmpeg + OpenGL)
 # =============================================================================
-
-# Find FFmpeg
-list(APPEND CMAKE_MODULE_PATH "C:/vcpkg/installed/x64-windows/share/ffmpeg")
-find_package(FFMPEG REQUIRED COMPONENTS avcodec avformat swscale avutil)
-
-# Find SDL2
-find_package(SDL2 REQUIRED)
-
-# Find OpenGL
-find_package(OpenGL REQUIRED)
 
 add_executable(entergram_emulator
     src/main.cpp
@@ -89,7 +100,8 @@ target_include_directories(entergram_emulator PRIVATE
 )
 
 target_link_libraries(entergram_emulator PRIVATE
-    ${SDL2_LIBRARIES}
+    SDL2::SDL2
+    SDL2::SDL2main
     ${FFMPEG_LIBRARIES}
     ${OPENGL_LIBRARIES}
 )

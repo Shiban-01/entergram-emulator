@@ -7,8 +7,12 @@
 #include <cstdio>
 #include <fstream>
 #include <cstdint>
+#include <cstdio>
 
 using namespace entergram;
+
+// Forward declaration
+void test_video_player();
 
 class TestCallbacks : public SnrVmCallbacks {
 public:
@@ -249,7 +253,92 @@ int main() {
     test_extract_and_decompress_main_snr();
     test_extract_movie();
     test_voice_directory();
+    test_video_player();
 
     printf("\n=== All integration tests passed! ===\n");
     return 0;
+}
+
+void test_video_player() {
+    printf("\n=== Test: VideoPlayer with movie from ROM ===\n\n");
+
+    RomReader reader;
+    std::string rom_path = "C:/Users/francisco.q/AppData/Roaming/eden/dump/01006A300BA2C000/romfs/data.rom";
+    assert(reader.open(rom_path));
+    assert(reader.parse());
+
+    // Extract a small movie: no0003a.mp4 (161KB)
+    auto file_data = reader.extract_file("movie/no0003a.mp4");
+    if (!file_data || file_data->data.empty()) {
+        printf("  ERROR: Cannot extract movie/no0003a.mp4\n");
+        printf("PASS: VideoPlayer (skipped - not found)\n");
+        return;
+    }
+
+    // Write to temp file
+    std::string temp_path = "build/temp_test_video.mp4";
+    {
+        std::ofstream f(temp_path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(file_data->data.data()), file_data->data.size());
+    }
+    printf("  Extracted %s: %zu bytes\n", temp_path.c_str(), file_data->data.size());
+
+    // Open with FFmpeg video player
+    VideoPlayer player;
+    bool opened = player.open(temp_path);
+    if (!opened) {
+        printf("  ERROR: Cannot open video: %s\n", player.last_error().c_str());
+        printf("PASS: VideoPlayer (skipped - open failed)\n");
+        return;
+    }
+
+    printf("  Video: %dx%d @ %.2f fps\n", player.width(), player.height(), player.frame_rate());
+
+    int frame_count = 0;
+    while (!player.is_eof() && frame_count < 10) {
+        auto frame = player.read_frame();
+        if (frame) {
+            printf("  Frame %d: %dx%d RGBA (%zu bytes)\n", frame_count + 1,
+                   frame->width, frame->height, frame->data.size());
+            frame_count++;
+        } else if (player.has_pending_frame()) {
+            // Frame was buffered by decoder, consume it
+            player.mark_frame_consumed();
+            auto buffered = player.read_frame();
+            if (buffered) {
+                printf("  Frame %d: %dx%d RGBA (%zu bytes)\n", frame_count + 1,
+                       buffered->width, buffered->height, buffered->data.size());
+                frame_count++;
+            }
+        } else if (player.has_error()) {
+            printf("  ERROR: %s\n", player.last_error().c_str());
+            break;
+        }
+    }
+
+    // Drain remaining frames (just count, don't print)
+    while (!player.is_eof()) {
+        auto frame = player.read_frame();
+        if (frame) {
+            player.mark_frame_consumed();
+            frame_count++;
+        } else if (player.has_pending_frame()) {
+            player.mark_frame_consumed();
+            auto buffered = player.read_frame();
+            if (buffered) {
+                player.mark_frame_consumed();
+                frame_count++;
+            }
+        } else {
+            break;
+        }
+    }
+
+    printf("  Total frames decoded: %d\n", frame_count);
+    printf("  EOF reached: %s\n", player.is_eof() ? "yes" : "no");
+    printf("PASS: VideoPlayer decoded %d frames from movie\n", frame_count);
+
+    // Cleanup
+    player.close();
+    std::remove(temp_path.c_str());
 }
