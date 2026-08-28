@@ -4,24 +4,28 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
 
 namespace entergram {
 
 // Audio playback system for .nxa files (Entergram's proprietary audio format).
-//
-// The .nxa format wraps standard audio codecs (likely Ogg Vorbis or raw PCM)
-// inside an Entergram container. This player extracts the audio data
-// and plays it via SDL_Audio.
-//
-// For the initial implementation, we use FFmpeg (libavformat) to probe
-// the .nxa files, since they may contain standard codec data.
+// Uses libopus to decode NXA1 files, SDL_Audio for playback.
 class AudioPlayer {
 public:
     AudioPlayer();
     ~AudioPlayer();
 
-    // Load and start playing an audio file (.nxa or .ogg)
-    bool play(const std::string& file_path);
+    AudioPlayer(const AudioPlayer&) = delete;
+    AudioPlayer& operator=(const AudioPlayer&) = delete;
+
+    // Initialize SDL audio subsystem
+    bool initialize();
+
+    // Shutdown audio subsystem
+    void shutdown();
+
+    // Load and start playing audio data (already decoded PCM)
+    void play_pcm(const std::vector<int16_t>& samples, int sample_rate, int channels);
 
     // Stop playback
     void stop();
@@ -40,12 +44,6 @@ public:
 
     // Wait for playback to complete (blocking)
     void wait_until_done();
-
-    // Initialize SDL audio subsystem
-    bool initialize();
-
-    // Shutdown audio subsystem
-    void shutdown();
 
 private:
     struct Impl;

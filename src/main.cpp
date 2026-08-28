@@ -10,6 +10,7 @@
 #include "core/snr_vm.hpp"
 #include "core/snr0_parser.hpp"
 #include "video/player.hpp"
+#include "audio/nxa_decoder.hpp"
 #include "renderer/renderer.hpp"
 #include "renderer/layer_manager.hpp"
 #include "audio/player.hpp"
@@ -408,11 +409,62 @@ void GameEngine::render() {
 // Game callbacks
 void GameEngine::play_voice(const std::string& file_name, int volume) {
     printf("VOICE: %s (vol=%d)\n", file_name.c_str(), volume);
+    // Extract and decode NXA voice file
+    auto file = rom_.extract_file("voice/" + file_name);
+    if (!file) {
+        printf("  Voice file not found: %s\n", file_name.c_str());
+        return;
+    }
+
+    entergram::NxaDecoder decoder;
+    std::vector<int16_t> pcm = decoder.decode(file->data);
+    if (pcm.empty()) {
+        printf("  Decode error: %s\n", decoder.last_error().c_str());
+        return;
+    }
+
+    printf("  Decoded: %zu samples @ %u Hz\n",
+           pcm.size(), 48000);
+
+    audio_player_.set_volume(volume / 100.0f);
+    audio_player_.play_pcm(pcm, 48000, 1);
 }
 void GameEngine::stop_voice(int) {}
 void GameEngine::wait_for_voice(int) {}
 void GameEngine::play_bgm(const std::string& file_name, int volume) {
     printf("BGM: %s (vol=%d)\n", file_name.c_str(), volume);
+    // BGM files are in bgm/ directory with .nxa extension
+    auto file = rom_.extract_file("bgm/" + file_name);
+    if (!file) {
+        // Try without extension
+        auto dot_pos = file_name.find('.');
+        std::string base = dot_pos != std::string::npos
+            ? file_name.substr(0, dot_pos) : file_name;
+        auto file2 = rom_.extract_file("bgm/" + base + ".nxa");
+        if (!file2) {
+            printf("  BGM file not found\n");
+            return;
+        }
+        file = file2;
+    }
+
+    auto info = entergram::parse_nxa(file->data);
+    if (!info) {
+        printf("  Not an NXA file\n");
+        return;
+    }
+
+    entergram::NxaDecoder decoder;
+    std::vector<int16_t> pcm = decoder.decode(file->data);
+    if (pcm.empty()) {
+        printf("  Decode error: %s\n", decoder.last_error().c_str());
+        return;
+    }
+
+    printf("  BGM decoded: %zu samples @ %u Hz\n", pcm.size(), info->sample_rate);
+
+    audio_player_.set_volume(volume / 100.0f);
+    audio_player_.play_pcm(pcm, info->sample_rate, info->channel_count);
 }
 void GameEngine::stop_bgm() {}
 void GameEngine::play_se(const std::string& file_name, int volume) {
