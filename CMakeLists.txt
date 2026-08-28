@@ -15,7 +15,7 @@ enable_testing()
 # Find dependencies
 # =============================================================================
 
-# Find FFmpeg
+# Find FFmpeg (video decoding)
 list(APPEND CMAKE_MODULE_PATH "C:/vcpkg/installed/x64-windows/share/ffmpeg")
 find_package(FFMPEG REQUIRED COMPONENTS avcodec avformat swscale avutil)
 
@@ -24,6 +24,10 @@ find_package(SDL2 REQUIRED)
 
 # Find OpenGL
 find_package(OpenGL REQUIRED)
+
+# Opus is installed via vcpkg; use the include/lib dirs directly
+set(OPUS_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
+set(OPUS_LIBRARY "C:/vcpkg/installed/x64-windows/lib/opus.lib")
 
 # =============================================================================
 # Unit tests (no FFmpeg/SDL2 dependency)
@@ -58,6 +62,18 @@ target_include_directories(minimal_test PRIVATE src)
 add_test(NAME MinimalTest COMMAND minimal_test)
 
 # =============================================================================
+# NXA decoder test (uses libopus)
+# =============================================================================
+
+add_executable(test_nxa
+    tests/test_nxa.cpp
+    src/audio/nxa_decoder.cpp
+)
+target_include_directories(test_nxa PRIVATE src ${OPUS_INCLUDE_DIR})
+target_link_libraries(test_nxa PRIVATE ${OPUS_LIBRARY})
+add_test(NAME NxaDecoderTest COMMAND test_nxa)
+
+# =============================================================================
 # Integration test (with FFmpeg video decoding)
 # =============================================================================
 
@@ -67,10 +83,11 @@ add_executable(test_integration
     src/core/snr_vm.cpp
     src/core/snr0_parser.cpp
     src/video/player.cpp
+    src/audio/nxa_decoder.cpp
 )
 target_include_directories(test_integration PRIVATE src)
-target_include_directories(test_integration PRIVATE ${FFMPEG_INCLUDE_DIRS})
-target_link_libraries(test_integration PRIVATE ${FFMPEG_LIBRARIES} SDL2::SDL2 SDL2::SDL2main)
+target_include_directories(test_integration PRIVATE ${FFMPEG_INCLUDE_DIRS} ${OPUS_INCLUDE_DIR})
+target_link_libraries(test_integration PRIVATE ${FFMPEG_LIBRARIES} SDL2::SDL2 SDL2::SDL2main ${OPUS_LIBRARY})
 add_test(NAME IntegrationTest COMMAND test_integration)
 
 # =============================================================================
@@ -83,6 +100,7 @@ add_executable(entergram_emulator
     src/core/snr_vm.cpp
     src/core/snr0_parser.cpp
     src/video/player.cpp
+    src/audio/nxa_decoder.cpp
     src/renderer/renderer.cpp
     src/renderer/gl_loader.cpp
     src/renderer/layer_manager.cpp
@@ -97,17 +115,19 @@ target_include_directories(entergram_emulator PRIVATE
     ${FFMPEG_INCLUDE_DIRS}
     ${SDL2_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIR}
+    ${OPUS_INCLUDE_DIR}
 )
 
 target_link_libraries(entergram_emulator PRIVATE
     SDL2::SDL2
     SDL2::SDL2main
     ${FFMPEG_LIBRARIES}
+    ${OPUS_LIBRARY}
     ${OPENGL_LIBRARIES}
 )
 
 # Copy FFmpeg + SDL2 DLLs next to the executable
-set(DLL_DEPS avcodec-63.dll avformat-63.dll avutil-61.dll swscale-10.dll)
+set(DLL_DEPS avcodec-63.dll avformat-63.dll avutil-61.dll swscale-10.dll opus.dll)
 if(WIN32)
     foreach(DLL ${DLL_DEPS})
         add_custom_command(TARGET entergram_emulator POST_BUILD
