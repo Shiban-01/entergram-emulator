@@ -1,71 +1,34 @@
 #!/bin/bash
-# Build script for Entergram Emulator releases
-# Usage: ./scripts/build_release.sh [version]
+# Build the Entergram Emulator in Release mode
+# Usage: ./scripts/build_release.sh
 
 set -e
 
-VERSION=${1:-"0.1.0-beta"}
 BUILD_DIR="build-release"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VCPKG_TOOLCHAIN="C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
-cd "$PROJECT_ROOT"
-
-# Detect platform
-case "$(uname -s)" in
-    Darwin*)    PLATFORM="macos" ;;
-    Linux*)     PLATFORM="linux" ;;
-    MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
-    *)          PLATFORM="unknown" ;;
-esac
-
-echo "=== Entergram Emulator Release Build v$VERSION ==="
-echo "Platform: $PLATFORM"
-echo "Project root: $PROJECT_ROOT"
-
-# Clean previous build
-rm -rf "$BUILD_DIR"
+echo "=== Building Entergram Emulator (Release) ==="
 
 # Configure
-echo ""
-echo "--- Configuring (CMake) ---"
-if [ "$PLATFORM" = "windows" ]; then
-    cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -G "Ninja"
-else
-    cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
-fi
+cmake -B $BUILD_DIR \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_TOOLCHAIN_FILE=$VCPKG_TOOLCHAIN \
+    -DUSE_SDL2=ON
 
 # Build
-echo ""
-echo "--- Building ---"
-cmake --build "$BUILD_DIR" --config Release --parallel
+cmake --build $BUILD_DIR --config Release -j$(nproc 2>/dev/null || echo 4)
 
-# Package
 echo ""
-echo "--- Packaging ---"
-OUTPUT_DIR="$PROJECT_ROOT/release-$PLATFORM-$VERSION"
-mkdir -p "$OUTPUT_DIR"
+echo "=== Build complete ==="
+echo "Executable: $BUILD_DIR/entergram_emulator.exe"
+echo ""
 
-# Copy binary
-if [ "$PLATFORM" = "windows" ]; then
-    cp "$BUILD_DIR/entergram_emulator.exe" "$OUTPUT_DIR/"
-    # Copy FFmpeg DLLs if they exist
-    if [ -d "/c/vcpkg/installed/x64-windows/bin" ]; then
-        cp /c/vcpkg/installed/x64-windows/bin/av*.dll "$OUTPUT_DIR/" 2>/dev/null || true
-        cp /c/vcpkg/installed/x64-windows/bin/sw*.dll "$OUTPUT_DIR/" 2>/dev/null || true
+# Copy DLLs
+echo "Copying DLLs..."
+for dll in avcodec-63.dll avformat-63.dll avutil-61.dll swscale-10.dll opus.dll; do
+    if [ -f "C:/vcpkg/installed/x64-windows/bin/$dll" ]; then
+        cp -f "C:/vcpkg/installed/x64-windows/bin/$dll" $BUILD_DIR/
     fi
-else
-    cp "$BUILD_DIR/entergram_emulator" "$OUTPUT_DIR/"
-fi
+done
 
-# Create zip
-echo ""
-echo "--- Creating archive ---"
-cd "$OUTPUT_DIR"
-zip -r "../entergram-emulator-$VERSION-$PLATFORM.zip" . || true
-cd "$PROJECT_ROOT"
-
-echo ""
-echo "=== Build complete! ==="
-echo "Release: $OUTPUT_DIR"
-echo "Archive: $PROJECT_ROOT/entergram-emulator-$VERSION-$PLATFORM.zip"
+echo "Done!"
