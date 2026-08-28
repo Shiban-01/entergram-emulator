@@ -167,6 +167,39 @@ bool SnrVm::execute(const SnrInstruction& instr, SnrVmCallbacks* callbacks) {
             context_.current_address = next_addr;
             return true;
 
+        case Opcode::LOAD: // 0xc0 - LAYERINIT
+            if (callbacks) callbacks->on_layer_load(
+                static_cast<int>(instr.arg1), 0, 0, 0);
+            context_.current_address = next_addr;
+            return true;
+
+        case Opcode::LAYER: // 0xc1 - LAYERLOAD
+            if (callbacks) callbacks->on_layer_load(
+                static_cast<int>(instr.arg1),
+                static_cast<int>(instr.arg2),
+                static_cast<int>(instr.arg3),
+                static_cast<int>(instr.arg4));
+            context_.current_address = next_addr;
+            return true;
+
+        case Opcode::ALPHA: // 0xc2 - LAYERCTRL (alpha)
+            if (callbacks) callbacks->on_layer_ctrl(
+                static_cast<int>(instr.arg1), 0,
+                static_cast<int>(instr.arg2),
+                static_cast<int>(instr.arg3),
+                static_cast<int>(instr.arg4), 0);
+            context_.current_address = next_addr;
+            return true;
+
+        case Opcode::MOVE: // 0xc3 - LAYERCTRL (position)
+            if (callbacks) callbacks->on_sprite_move(
+                static_cast<int>(instr.arg1),
+                static_cast<int>(instr.arg2),
+                static_cast<int>(instr.arg3),
+                static_cast<int>(instr.arg4), 0);
+            context_.current_address = next_addr;
+            return true;
+
         case Opcode::NOP:
             context_.current_address = next_addr;
             return true;

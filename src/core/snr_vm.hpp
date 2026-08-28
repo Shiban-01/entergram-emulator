@@ -75,6 +75,12 @@ public:
     virtual void on_choice(const std::vector<std::string>& options) {}
     virtual void on_system_call(uint32_t code, const std::string& data) {}
     virtual void on_wait(int frames) {}
+    // Layer/sprite operations
+    virtual void on_layer_load(int layer_id, int layer_type, int param1, int param2) {}
+    virtual void on_layer_ctrl(int layer_id, int property_id, int target, int duration, int flags, int easing) {}
+    virtual void on_layer_unload(int layer_id) {}
+    virtual void on_sprite_move(int layer_id, int x, int y, int duration, int flags) {}
+    virtual void on_sprite_alpha(int layer_id, int alpha, int duration, int flags) {}
 };
 
 class SnrVm {
