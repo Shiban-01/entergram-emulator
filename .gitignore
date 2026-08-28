@@ -1,1 +1,13 @@
 build/
+build-new/
+*.o
+*.obj
+*.exe
+*.dll
+intro_movie.mp4
+output*.txt
+__pycache__/
+*.pyc
+*.log
+.vs/
+.vscode/

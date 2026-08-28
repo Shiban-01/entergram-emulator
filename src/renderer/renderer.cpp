@@ -1,5 +1,10 @@
 #include "renderer.hpp"
 #include "gl_loader.hpp"
+
+// Enable OpenGL extension prototypes so glClear/glGenTextures etc. are declared
+#define GL_GLEXT_PROTOTYPES
+#include <SDL_opengl.h>
+
 #include <cassert>
 #include <cstring>
 #include <cstdio>
@@ -15,11 +20,12 @@ layout (location = 1) in vec2 aTexCoord;
 layout (location = 2) in vec4 aColor;
 out vec2 texCoord;
 out vec4 vertexColor;
-uniform mat4 uProjection;
+uniform vec2 uScale;  // scale factor for NDC space
 void main() {
     texCoord = aTexCoord;
     vertexColor = aColor;
-    gl_Position = uProjection * vec4(aPos, 0.0, 1.0);
+    // Direct NDC coordinates: pos is already in [0,1] range, convert to [-1,1]
+    gl_Position = vec4(aPos * 2.0 - 1.0, 0.0, 1.0);
 }
 )glsl";
 
@@ -29,10 +35,12 @@ in vec2 texCoord;
 in vec4 vertexColor;
 out vec4 FragColor;
 uniform sampler2D uTexture;
+uniform vec4 uColor;
 void main() {
     vec4 texColor = texture(uTexture, texCoord);
-    FragColor = texColor * vertexColor;
-    if (FragColor.a == 0.0) discard;
+    vec4 color = uColor;
+    if (color.a == 0.0) color.a = 1.0;
+    FragColor = texColor * color;
 }
 )glsl";
 
@@ -46,6 +54,10 @@ bool SpriteRenderer::initialize() {
             return false;
         }
     }
+
+    printf("OpenGL functions loaded: p_glCreateShader=%p p_glUseProgram=%p p_glDrawElements=%s\n",
+           (void*)p_glCreateShader, (void*)p_glUseProgram,
+           (void*)glDrawElements ? "available" : "null");
 
     shader_program_ = p_glCreateProgram();
     if (shader_program_ == 0) {
@@ -89,6 +101,7 @@ bool SpriteRenderer::initialize() {
         fprintf(stderr, "Link error: %s\n", info_log);
         return false;
     }
+    printf("Shader program linked: %u\n", shader_program_);
 
     p_glDeleteShader(vs);
     p_glDeleteShader(fs);
@@ -97,6 +110,7 @@ bool SpriteRenderer::initialize() {
     p_glBindVertexArray(vao_);
 
     float vertices[] = {
+        // pos      tex
         0.0f, 0.0f,    0.0f, 0.0f,
         1.0f, 0.0f,    1.0f, 0.0f,
         1.0f, 1.0f,    1.0f, 1.0f,
@@ -112,8 +126,10 @@ bool SpriteRenderer::initialize() {
     p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
     p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
 
+    // Position attribute (location = 0)
     p_glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     p_glEnableVertexAttribArray(0);
+    // TexCoord attribute (location = 1)
     p_glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
     p_glEnableVertexAttribArray(1);
 
@@ -122,10 +138,41 @@ bool SpriteRenderer::initialize() {
 }
 
 void SpriteRenderer::render(const Sprite& sprite, const Texture& texture) {
-    (void)sprite;
     p_glUseProgram(shader_program_);
     texture.bind(0);
+    
+    // Set texture unit for the sampler uniform
+    GLint tex_loc = p_glGetUniformLocation(shader_program_, "uTexture");
+    if (tex_loc >= 0) {
+        p_glUniform1i(tex_loc, 0);
+        printf("[RENDER] texture unit=%d, texture_id=%u\n", 0, texture.gl_texture_id());
+    }
+    
     p_glBindVertexArray(vao_);
+
+    // Set sprite transform (position, size, color)
+    GLint scale_loc = p_glGetUniformLocation(shader_program_, "uScale");
+    if (scale_loc >= 0) {
+        // Position and size of sprite in normalized [0,1] device space
+        float pos_x = sprite.x;
+        float pos_y = sprite.y;
+        float w = sprite.width;
+        float h = sprite.height;
+        p_glUniform2f(scale_loc, w, h);
+    }
+
+    // Set color (default: white opaque if sprite color not set)
+    float r = ((sprite.color >> 24) & 0xFF) / 255.0f;
+    float g = ((sprite.color >> 16) & 0xFF) / 255.0f;
+    float b = ((sprite.color >> 8) & 0xFF) / 255.0f;
+    float a = (sprite.color & 0xFF) / 255.0f;
+    if (a == 0.0f) a = 1.0f;  // Default to opaque if not set
+    GLint color_loc = p_glGetUniformLocation(shader_program_, "uColor");
+    if (color_loc >= 0) {
+        p_glUniform4f(color_loc, r, g, b, a);
+    }
+
+    // Use core OpenGL function (available on all platforms)
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
 }
 

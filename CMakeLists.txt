@@ -15,9 +15,21 @@ enable_testing()
 # Find dependencies
 # =============================================================================
 
-# Find FFmpeg (video decoding)
-list(APPEND CMAKE_MODULE_PATH "C:/vcpkg/installed/x64-windows/share/ffmpeg")
-find_package(FFMPEG REQUIRED COMPONENTS avcodec avformat swscale avutil)
+# Find FFmpeg (video decoding) - use vcpkg installed targets
+set(FFMPEG_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
+set(FFMPEG_LIB_DIR "C:/vcpkg/installed/x64-windows/lib")
+
+# FFmpeg libraries we need (from vcpkg installed)
+find_library(AVCODEC_LIB NAMES avcodec PATHS ${FFMPEG_LIB_DIR} NO_DEFAULT_PATH)
+find_library(AVFORMAT_LIB NAMES avformat PATHS ${FFMPEG_LIB_DIR} NO_DEFAULT_PATH)
+find_library(AVUTIL_LIB NAMES avutil PATHS ${FFMPEG_LIB_DIR} NO_DEFAULT_PATH)
+find_library(SWSCALE_LIB NAMES swscale PATHS ${FFMPEG_LIB_DIR} NO_DEFAULT_PATH)
+find_library(SWRESAMPLE_LIB NAMES swresample PATHS ${FFMPEG_LIB_DIR} NO_DEFAULT_PATH)
+
+set(FFMPEG_FOUND TRUE)
+if(NOT AVCODEC_LIB)
+    message(FATAL_ERROR "FFmpeg not found (avcodec missing)")
+endif()
 
 # Find SDL2
 find_package(SDL2 REQUIRED)
@@ -86,8 +98,8 @@ add_executable(test_integration
     src/audio/nxa_decoder.cpp
 )
 target_include_directories(test_integration PRIVATE src)
-target_include_directories(test_integration PRIVATE ${FFMPEG_INCLUDE_DIRS} ${OPUS_INCLUDE_DIR})
-target_link_libraries(test_integration PRIVATE ${FFMPEG_LIBRARIES} SDL2::SDL2 SDL2::SDL2main ${OPUS_LIBRARY})
+target_include_directories(test_integration PRIVATE ${FFMPEG_INCLUDE_DIR} ${OPUS_INCLUDE_DIR})
+target_link_libraries(test_integration PRIVATE ${AVCODEC_LIB} ${AVFORMAT_LIB} ${AVUTIL_LIB} ${SWSCALE_LIB} SDL2::SDL2 SDL2::SDL2main ${OPUS_LIBRARY})
 add_test(NAME IntegrationTest COMMAND test_integration)
 
 # =============================================================================
@@ -111,8 +123,17 @@ add_executable(entergram_emulator
 target_include_directories(entergram_emulator PRIVATE src)
 target_compile_definitions(entergram_emulator PRIVATE USE_SDL2)
 
+# Conditional HAVE_SWRESAMPLE define
+find_library(SWRESAMPLE_LIBRARY NAMES swresample PATHS "C:/vcpkg/installed/x64-windows/lib" NO_DEFAULT_PATH)
+if(SWRESAMPLE_LIBRARY)
+    set(SWRESAMPLE_FOUND TRUE)
+    target_compile_definitions(entergram_emulator PRIVATE HAVE_SWRESAMPLE)
+    target_compile_definitions(test_integration PRIVATE HAVE_SWRESAMPLE)
+    target_link_libraries(test_integration PRIVATE ${SWRESAMPLE_LIBRARY})
+endif()
+
 target_include_directories(entergram_emulator PRIVATE
-    ${FFMPEG_INCLUDE_DIRS}
+    ${FFMPEG_INCLUDE_DIR}
     ${SDL2_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIR}
     ${OPUS_INCLUDE_DIR}
@@ -121,13 +142,20 @@ target_include_directories(entergram_emulator PRIVATE
 target_link_libraries(entergram_emulator PRIVATE
     SDL2::SDL2
     SDL2::SDL2main
-    ${FFMPEG_LIBRARIES}
+    ${AVCODEC_LIB}
+    ${AVFORMAT_LIB}
+    ${AVUTIL_LIB}
+    ${SWSCALE_LIB}
     ${OPUS_LIBRARY}
     ${OPENGL_LIBRARIES}
 )
 
+if(SWRESAMPLE_LIBRARY)
+    target_link_libraries(entergram_emulator PRIVATE ${SWRESAMPLE_LIBRARY})
+endif()
+
 # Copy FFmpeg + SDL2 DLLs next to the executable
-set(DLL_DEPS avcodec-63.dll avformat-63.dll avutil-61.dll swscale-10.dll opus.dll)
+set(DLL_DEPS avcodec-63.dll avformat-63.dll avutil-61.dll swscale-10.dll swresample-7.dll opus.dll)
 if(WIN32)
     foreach(DLL ${DLL_DEPS})
         add_custom_command(TARGET entergram_emulator POST_BUILD

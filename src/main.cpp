@@ -194,7 +194,6 @@ bool GameEngine::extract_intro_video() {
     for (const auto& path : intro_videos) {
         auto movie = rom_.extract_file(path);
         if (movie && !movie->data.empty()) {
-            // Use platform-appropriate temp path
             intro_video_path_ = "intro_movie.mp4";
 
             std::ofstream f(intro_video_path_, std::ios::binary);
@@ -208,6 +207,16 @@ bool GameEngine::extract_intro_video() {
                 std::cout << "  Video: " << video_player_.width() << "x"
                           << video_player_.height() << " @ "
                           << video_player_.frame_rate() << " fps\n";
+
+                // Extract audio from the video
+                if (video_player_.has_audio_stream()) {
+                    printf("  Extracting audio...\n");
+                    auto audio = video_player_.extract_audio();
+                    if (!audio.empty()) {
+                        audio_player_.play_pcm(audio, 48000, 1);
+                        printf("  Audio: %zu samples playing\n", audio.size());
+                    }
+                }
                 return true;
             }
         }
@@ -217,23 +226,30 @@ bool GameEngine::extract_intro_video() {
 
 void GameEngine::render_video_frame() {
 #if WITH_SDL2
-    // Clear screen and render video texture
-    renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
-
     // Get current RGBA frame
     if (video_player_.has_pending_frame()) {
         auto frame = video_player_.read_frame();
         if (frame && frame->valid()) {
             // Upload to texture and render as fullscreen quad
             video_texture_.upload(frame->width, frame->height, frame->data.data());
+            printf("[RENDER] Video texture uploaded: %dx%d, texture_id=%u\n",
+                   frame->width, frame->height, video_texture_.gl_texture_id());
             entergram::Sprite sprite;
             sprite.x = 0;
             sprite.y = 0;
             sprite.width = static_cast<float>(frame->width);
             sprite.height = static_cast<float>(frame->height);
+            renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
             renderer_.render_video(sprite, video_texture_);
             video_player_.mark_frame_consumed();
+        } else {
+            renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
+            SDL_GL_SwapWindow(window_);
         }
+    } else {
+        // No pending frame: just show black (frame being decoded)
+        renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
+        SDL_GL_SwapWindow(window_);
     }
 
     SDL_GL_SwapWindow(window_);
@@ -244,47 +260,55 @@ void GameEngine::update_video() {
     if (state_ != GameState::IntroVideo) return;
 
     // If video player has no stream (failed to open), skip to main menu
-    if (!video_player_.has_error() && video_player_.width() == 0 && video_player_.height() == 0) {
-        // No video available, skip to main menu
+    if (video_player_.width() == 0 && video_player_.height() == 0) {
         state_ = GameState::MainMenu;
         printf("No intro video available, going to main menu\n");
+        fflush(stdout);
         return;
     }
 
-    // Calculate video timing for real-time playback
-    static auto video_start = std::chrono::steady_clock::now();
-    if (video_player_.is_eof() && !video_player_.has_pending_frame()) {
-        // Check if we need to drain remaining frames
-        video_player_.read_frame();
-        if (video_player_.has_pending_frame()) {
-            render_video_frame();
-        } else {
-            state_ = GameState::MainMenu;
-            printf("Intro video finished, showing SELECT menu\n");
-            std::remove(intro_video_path_.c_str());
-        }
-        return;
+    // After audio extraction, seek video to beginning (EOF may have been reached)
+    if (video_player_.is_eof()) {
+        video_player_.seek(0.0);
+        printf("[VIDEO] Seeked to start\n");
+        fflush(stdout);
     }
 
-    // Time-based frame scheduling: only decode a new frame if enough time has passed
+    // Real-time frame scheduling using the video's frame rate
     double fps = video_player_.frame_rate();
-    if (fps <= 0) fps = 30.0;
+    if (fps <= 0) fps = 29.97;
     double frame_duration_ms = 1000.0 / fps;
+
+    static auto video_start = std::chrono::steady_clock::now();
+    static int last_frame_index = -1;
 
     auto now = std::chrono::steady_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(now - video_start).count();
-
-    // Frame index based on elapsed time
     int target_frame = static_cast<int>(elapsed_ms / frame_duration_ms);
 
-    if (video_player_.has_pending_frame()) {
-        // Render the buffered frame
-        render_video_frame();
-    } else {
-        // Decode next frame
-        video_player_.read_frame();
+    if (video_player_.is_eof() && !video_player_.has_pending_frame()) {
+        state_ = GameState::MainMenu;
+        printf("Intro video finished, showing SELECT menu\n");
+        fflush(stdout);
+        std::remove(intro_video_path_.c_str());
+        return;
+    }
+
+    // Only decode/consume a new frame when we've reached the right frame index
+    if (target_frame > last_frame_index) {
+        last_frame_index = target_frame;
+        printf("[VIDEO] Frame %d, has_frame=%d\n", target_frame, video_player_.has_pending_frame());
+        fflush(stdout);
+
         if (video_player_.has_pending_frame()) {
+            // Consume the buffered frame
             render_video_frame();
+        } else {
+            // Decode next frame
+            video_player_.read_frame();
+            if (video_player_.has_pending_frame()) {
+                render_video_frame();
+            }
         }
     }
 }
@@ -292,6 +316,7 @@ void GameEngine::update_video() {
 bool GameEngine::initialize(const std::string& rom_path) {
     std::cout << "=== Entergram Emulator v0.1.0 ===\n";
     std::cout << "Loading ROM: " << rom_path << "\n";
+    std::cout.flush();
 
     if (!rom_.open(rom_path)) {
         std::cerr << "ERROR: Cannot open ROM file\n";
@@ -364,8 +389,7 @@ bool GameEngine::initialize(const std::string& rom_path) {
     std::cout << "Extracting intro video...\n";
     if (!extract_intro_video()) {
         std::cerr << "WARNING: Cannot extract intro video - skipping intro\n";
-        // Skip intro video, go directly to main menu
-        // The VM will still run and process any MOVIE opcodes later
+        std::cerr.flush();
     }
 #endif
 

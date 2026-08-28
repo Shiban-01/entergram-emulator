@@ -1,7 +1,7 @@
 @echo off
 call "C:\PROGRA~1\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 cd /d "C:\Users\francisco.q\Desktop\entergram-emulator"
-"C:\PROGRA~1\CMake\bin\cmake.exe" -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_CXX_FLAGS="-DHAVE_SWRESAMPLE"
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
 if %ERRORLEVEL% NEQ 0 (
     echo CMAKE CONFIGURE FAILED
     exit /b 1

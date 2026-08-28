@@ -3,9 +3,14 @@
 
 #pragma once
 
-// Include SDL.h for SDL_GL_GetProcAddress, and SDL_opengl.h for GL types
+// Include SDL.h for SDL_GL_GetProcAddress, and SDL_opengl.h for GL types + extensions
+#define GL_GLEXT_PROTOTYPES
 #include <SDL.h>
 #include <SDL_opengl.h>
+#include <GL/glext.h>
+#ifndef PFNGLDRAWELEMENTSPROC
+typedef void (APIENTRYP PFNGLDRAWELEMENTSPROC) (GLenum mode, GLsizei count, GLenum type, const void *indices);
+#endif
 
 namespace entergram {
 
@@ -32,12 +37,17 @@ namespace gl_loader_detail {
     extern PFNGLENABLEVERTEXATTRIBARRAYPROC  p_glEnableVertexAttribArray;
     extern PFNGLGETUNIFORMLOCATIONPROC       p_glGetUniformLocation;
     extern PFNGLUNIFORMMATRIX4FVPROC         p_glUniformMatrix4fv;
+    extern PFNGLUNIFORM1IPROC                p_glUniform1i;
+    extern PFNGLUNIFORM2IPROC                p_glUniform2i;
+    extern PFNGLUNIFORM2FPROC               p_glUniform2f;
+    extern PFNGLUNIFORM4FPROC               p_glUniform4f;
     extern PFNGLACTIVETEXTUREPROC            p_glActiveTexture;
     extern PFNGLGENERATEMIPMAPPROC           p_glGenerateMipmap;
     extern PFNGLGETSHADERIVPROC              p_glGetShaderiv;
     extern PFNGLGETSHADERINFOLOGPROC         p_glGetShaderInfoLog;
     extern PFNGLGETPROGRAMIVPROC             p_glGetProgramiv;
     extern PFNGLGETPROGRAMINFOLOGPROC        p_glGetProgramInfoLog;
+    extern PFNGLDRAWELEMENTSPROC              p_glDrawElements;
 }
 
 namespace gl_loader {

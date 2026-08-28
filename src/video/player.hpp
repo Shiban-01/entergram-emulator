@@ -39,8 +39,12 @@ public:
     void resume();
     void seek(double timestamp_seconds);
 
-    bool has_error() const { return !last_error_.empty(); }
+    // Audio extraction from video
+    bool has_audio_stream() const;
+    std::vector<int16_t> extract_audio(double target_sample_rate = 48000, int target_channels = 1);
+    int audio_sample_rate() const;
     std::string last_error() const { return last_error_; }
+    bool has_error() const { return !last_error_.empty(); }
 
 private:
     struct Impl;
