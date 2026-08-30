@@ -592,9 +592,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "No ROM path specified, searching for data.rom...\n";
         namespace fs = std::filesystem;
 
-        std::vector<std::string> search_paths = {
-            "data.rom",                                    // Current dir
-        };
+        std::vector<std::string> search_paths;
 
         #ifdef _WIN32
         // Get executable directory
@@ -602,9 +600,22 @@ int main(int argc, char* argv[]) {
         DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
         if (len > 0) {
             fs::path exe_dir = fs::path(exe_path).parent_path();
-            search_paths.push_back((exe_dir / "data.rom").string());
 
-            // Search games/<name>/data.rom for all game folders
+            // 1. Read roms.txt first (highest priority - user configured)
+            fs::path roms_txt = exe_dir / "roms.txt";
+            if (fs::exists(roms_txt)) {
+                std::ifstream f(roms_txt);
+                std::string line;
+                while (std::getline(f, line)) {
+                    line.erase(0, line.find_first_not_of(" \t\r\n"));
+                    line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                    if (!line.empty()) {
+                        search_paths.push_back(line);
+                    }
+                }
+            }
+
+            // 2. games/<name>/data.rom - auto-discovered game folders
             fs::path games_dir = exe_dir / "games";
             if (fs::exists(games_dir) && fs::is_directory(games_dir)) {
                 for (const auto& game_entry : fs::directory_iterator(games_dir)) {
@@ -617,24 +628,23 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Read roms.txt for user-configured ROM paths
-            fs::path roms_txt = exe_dir / "roms.txt";
-            if (fs::exists(roms_txt)) {
-                std::ifstream f(roms_txt);
-                std::string line;
-                while (std::getline(f, line)) {
-                    line.erase(0, line.find_first_not_of(" \t\r\n"));
-
-                    line.erase(line.find_last_not_of(" \t\r\n") + 1);
-
-                    if (!line.empty()) {
-                        search_paths.push_back(line);
-                    }
+            // 3. data.rom in exe dir (fallback)
+            search_paths.push_back((exe_dir / "data.rom").string());
+        }
+        #else
+        // Read roms.txt from current dir
+        if (fs::exists("roms.txt")) {
+            std::ifstream f("roms.txt");
+            std::string line;
+            while (std::getline(f, line)) {
+                line.erase(0, line.find_first_not_of(" \t\r\n"));
+                line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                if (!line.empty()) {
+                    search_paths.push_back(line);
                 }
             }
         }
-        #else
-        // On Linux/macOS, search for games/data.rom in current dir
+        // games/<name>/data.rom
         if (fs::exists("games") && fs::is_directory("games")) {
             for (const auto& game_entry : fs::directory_iterator("games")) {
                 if (game_entry.is_directory()) {
@@ -645,7 +655,9 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        search_paths.push_back("data.rom");
         #endif
+
 
         for (const auto& p : search_paths) {
             if (fs::exists(p)) {
