@@ -24,6 +24,10 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+#include <filesystem>
 
 #ifdef USE_SDL2
     #include <SDL2/SDL.h>
@@ -579,21 +583,52 @@ int GameEngine::run_sdl() {
 #endif
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <path_to_data.rom>\n";
-        return 1;
+    std::string rom_path;
+
+    if (argc >= 2) {
+        rom_path = argv[1];
+    } else {
+        // Auto-search for data.rom in common locations
+        std::cerr << "No ROM path specified, searching for data.rom...\n";
+        namespace fs = std::filesystem;
+
+        std::vector<std::string> search_paths = {
+            "data.rom",
+        };
+
+        // Same directory as the executable
+        char exe_path[MAX_PATH];
+        DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+        if (len > 0) {
+            fs::path exe_dir = fs::path(exe_path).parent_path();
+            search_paths.push_back((exe_dir / "data.rom").string());
+        }
+
+        for (const auto& p : search_paths) {
+            if (fs::exists(p)) {
+                rom_path = p;
+                break;
+            }
+        }
+
+        if (rom_path.empty()) {
+            std::cerr << "Usage: " << argv[0] << " <path_to_data.rom>\n";
+            std::cerr << "Or place data.rom in the executable's directory.\n";
+            return 1;
+        }
+        std::cerr << "Found: " << rom_path << "\n";
     }
 
 #if WITH_SDL2
     GameEngine engine;
-    if (!engine.initialize(argv[1])) {
+    if (!engine.initialize(rom_path)) {
         return 1;
     }
     return engine.run_sdl();
 #else
     GameCallbacks callbacks;
     GameEngine engine;
-    if (!engine.initialize(argv[1])) {
+    if (!engine.initialize(rom_path)) {
         return 1;
     }
     callbacks.engine = &engine;
