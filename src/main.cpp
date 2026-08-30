@@ -79,7 +79,7 @@ public:
     GameEngine();
     ~GameEngine() = default;
 
-    bool initialize(const std::string& rom_path);
+    bool initialize(const std::string& rom_path, bool list_mode = false);
 
 #if WITH_SDL2
     int run_sdl();
@@ -188,10 +188,13 @@ bool GameEngine::load_script(const std::string& script_path) {
 }
 
 bool GameEngine::extract_intro_video() {
-    // Try extracting the intro video from movie/ directory
-    // The intro is sakucs_op.mp4 (151MB) - or a smaller one for testing
+    // Try extracting the intro video from movie/ directory.
+    // Different Entergram games use different intro filenames:
+    //   Umineko: movie/sakucs_op.mp4
+    //   Higurashi: movie/mv01.mp4
     std::vector<std::string> intro_videos = {
-        "movie/sakucs_op.mp4",
+        "movie/sakucs_op.mp4",   // Umineko
+        "movie/mv01.mp4",        // Higurashi
         "movie/op1.mp4",
     };
 
@@ -317,7 +320,7 @@ void GameEngine::update_video() {
     }
 }
 
-bool GameEngine::initialize(const std::string& rom_path) {
+bool GameEngine::initialize(const std::string& rom_path, bool list_mode) {
     std::cout << "=== Entergram Emulator v0.1.0 ===\n";
     std::cout << "Loading ROM: " << rom_path << "\n";
     std::cout.flush();
@@ -339,6 +342,25 @@ bool GameEngine::initialize(const std::string& rom_path) {
     std::cout << "Root directory:\n";
     for (const auto& entry : root.children) {
         std::cout << "  " << entry.name << "/ (" << (entry.is_directory ? "dir" : "file") << ")\n";
+    }
+
+    // If --list flag, dump movie/ directory contents and exit
+    if (list_mode) {
+        std::cout << "\nListing movie/ directory:\n";
+        auto movie_dir = rom_.find_directory("movie");
+        if (movie_dir) {
+            for (const auto& entry : (*movie_dir)->children) {
+                std::cout << "  " << entry.name;
+                if (entry.is_directory) {
+                    std::cout << "/ (dir)\n";
+                } else {
+                    std::cout << " (" << (entry.data_size / (1024*1024)) << "MB)\n";
+                }
+            }
+        } else {
+            std::cout << "  (movie/ directory not found)\n";
+        }
+        return true;
     }
 
     if (!load_script("main.snr")) {
@@ -583,11 +605,20 @@ int GameEngine::run_sdl() {
 #endif
 
 int main(int argc, char* argv[]) {
+    bool list_mode = false;
     std::string rom_path;
 
-    if (argc >= 2) {
-        rom_path = argv[1];
-    } else {
+    // Parse args
+    for (int i = 1; i < argc; i++) {
+        std::string arg(argv[i]);
+        if (arg == "--list" || arg == "-l") {
+            list_mode = true;
+        } else {
+            rom_path = arg;
+        }
+    }
+
+    if (rom_path.empty() && !list_mode) {
         // Auto-search for data.rom in common locations
         std::cerr << "No ROM path specified, searching for data.rom...\n";
         namespace fs = std::filesystem;
@@ -682,14 +713,14 @@ int main(int argc, char* argv[]) {
 
 #if WITH_SDL2
     GameEngine engine;
-    if (!engine.initialize(rom_path)) {
+    if (!engine.initialize(rom_path, list_mode)) {
         return 1;
     }
     return engine.run_sdl();
 #else
     GameCallbacks callbacks;
     GameEngine engine;
-    if (!engine.initialize(rom_path)) {
+    if (!engine.initialize(rom_path, list_mode)) {
         return 1;
     }
     callbacks.engine = &engine;

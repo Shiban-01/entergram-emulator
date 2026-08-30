@@ -272,6 +272,26 @@ std::optional<const RomEntry*> RomReader::find_entry(
     return std::nullopt;
 }
 
+std::optional<const RomEntry*> RomReader::find_directory_in(
+    const RomEntry& parent, const std::vector<std::string>& parts) {
+    const RomEntry* current = &parent;
+    for (const auto& part : parts) {
+        auto found = find_entry(*current, part);
+        if (!found) return std::nullopt;
+        current = *found;
+    }
+    return current->is_directory ? std::optional<const RomEntry*>(current) : std::nullopt;
+}
+
+std::optional<const RomEntry*> RomReader::find_directory_in(
+    const RomEntry& parent, const std::string& path) {
+    return find_directory_in(parent, split_path(path));
+}
+
+std::optional<const RomEntry*> RomReader::find_directory(const std::string& path) const {
+    return find_directory_in(root(), path);
+}
+
 const RomEntry& RomReader::root() const {
     if (!root_entry_) {
         throw std::runtime_error("RomReader: parse() was not called");

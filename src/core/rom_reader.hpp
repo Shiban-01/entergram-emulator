@@ -79,6 +79,14 @@ public:
     static std::optional<const RomEntry*> find_entry(
         const RomEntry& dir, const std::string& name);
 
+    // Find a directory entry by path (e.g. "movie", "movie/intro")
+    std::optional<const RomEntry*> find_directory(const std::string& path) const;
+    // Find a directory recursively from a parent entry
+    static std::optional<const RomEntry*> find_directory_in(
+        const RomEntry& parent, const std::vector<std::string>& parts);
+    static std::optional<const RomEntry*> find_directory_in(
+        const RomEntry& parent, const std::string& path);
+
 private:
     std::string rom_path_;
     std::vector<uint8_t> index_data_;
