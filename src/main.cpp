@@ -593,16 +593,59 @@ int main(int argc, char* argv[]) {
         namespace fs = std::filesystem;
 
         std::vector<std::string> search_paths = {
-            "data.rom",
+            "data.rom",                                    // Current dir
         };
 
-        // Same directory as the executable
+        #ifdef _WIN32
+        // Get executable directory
         char exe_path[MAX_PATH];
         DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
         if (len > 0) {
             fs::path exe_dir = fs::path(exe_path).parent_path();
             search_paths.push_back((exe_dir / "data.rom").string());
+
+            // Search games/<name>/data.rom for all game folders
+            fs::path games_dir = exe_dir / "games";
+            if (fs::exists(games_dir) && fs::is_directory(games_dir)) {
+                for (const auto& game_entry : fs::directory_iterator(games_dir)) {
+                    if (game_entry.is_directory()) {
+                        fs::path candidate = game_entry.path() / "data.rom";
+                        if (fs::exists(candidate)) {
+                            search_paths.push_back(candidate.string());
+                        }
+                    }
+                }
+            }
+
+            // Read roms.txt for user-configured ROM paths
+            fs::path roms_txt = exe_dir / "roms.txt";
+            if (fs::exists(roms_txt)) {
+                std::ifstream f(roms_txt);
+                std::string line;
+                while (std::getline(f, line)) {
+                    line.erase(0, line.find_first_not_of(" \t\r\n"));
+
+                    line.erase(line.find_last_not_of(" \t\r\n") + 1);
+
+                    if (!line.empty()) {
+                        search_paths.push_back(line);
+                    }
+                }
+            }
         }
+        #else
+        // On Linux/macOS, search for games/data.rom in current dir
+        if (fs::exists("games") && fs::is_directory("games")) {
+            for (const auto& game_entry : fs::directory_iterator("games")) {
+                if (game_entry.is_directory()) {
+                    fs::path candidate = game_entry.path() / "data.rom";
+                    if (fs::exists(candidate)) {
+                        search_paths.push_back(candidate.string());
+                    }
+                }
+            }
+        }
+        #endif
 
         for (const auto& p : search_paths) {
             if (fs::exists(p)) {
@@ -612,9 +655,15 @@ int main(int argc, char* argv[]) {
         }
 
         if (rom_path.empty()) {
+            std::cerr << "No data.rom found.\n";
             std::cerr << "Usage: " << argv[0] << " <path_to_data.rom>\n";
-            std::cerr << "Or place data.rom in the executable's directory.\n";
+            std::cerr << "Or place data.rom next to the emulator, or in games/<juego>/data.rom\n";
             return 1;
+        }
+        // Show which game was detected
+        if (rom_path.find("games/") != std::string::npos) {
+            fs::path p(rom_path);
+            std::cerr << "Game: " << p.parent_path().filename().string() << "\n";
         }
         std::cerr << "Found: " << rom_path << "\n";
     }
