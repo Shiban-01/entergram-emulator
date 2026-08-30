@@ -26,6 +26,9 @@
 #include <cstdio>
 #ifdef _WIN32
     #include <windows.h>
+    #include <io.h>
+    #define isatty _isatty
+    #define fileno _fileno
 #endif
 #include <filesystem>
 
@@ -43,6 +46,7 @@ constexpr int VIRTUAL_WIDTH = 1920;
 constexpr int VIRTUAL_HEIGHT = 1080;
 
 enum class GameState {
+    RomSelect,
     Boot,
     IntroVideo,
     MainMenu,
@@ -604,6 +608,159 @@ int GameEngine::run_sdl() {
 }
 #endif
 
+// =============================================================================
+// ROM Discovery & Interactive Menu
+// =============================================================================
+
+struct RomEntry {
+    std::string path;
+    std::string name;
+    uint64_t size = 0;
+};
+
+static std::vector<RomEntry> scan_all_roms() {
+    std::vector<RomEntry> roms;
+    namespace fs = std::filesystem;
+
+    std::vector<fs::path> search_dirs;
+
+#ifdef _WIN32
+    // Executable directory
+    char exe_path[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    if (len > 0) {
+        search_dirs.push_back(fs::path(exe_path).parent_path());
+    }
+#endif
+    // Current working directory
+    search_dirs.push_back(fs::current_path());
+
+    for (const auto& dir : search_dirs) {
+        // data.rom in this dir
+        fs::path candidate = dir / "data.rom";
+        if (fs::exists(candidate)) {
+            auto sz = fs::file_size(candidate);
+            roms.push_back({candidate.string(), "data.rom", sz});
+        }
+        // games/<juego>/data.rom
+        fs::path games_dir = dir / "games";
+        if (fs::exists(games_dir) && fs::is_directory(games_dir)) {
+            for (const auto& game_entry : fs::directory_iterator(games_dir)) {
+                if (game_entry.is_directory()) {
+                    fs::path rom = game_entry.path() / "data.rom";
+                    if (fs::exists(rom)) {
+                        auto sz = fs::file_size(rom);
+                        roms.push_back({rom.string(), game_entry.path().filename().string() + "/data.rom", sz});
+                    }
+                }
+            }
+        }
+        // roms.txt
+        fs::path roms_txt = dir / "roms.txt";
+        if (fs::exists(roms_txt)) {
+            std::ifstream f(roms_txt);
+            std::string line;
+            while (std::getline(f, line)) {
+                line.erase(0, line.find_first_not_of(" \t\r\n"));
+                line.erase(line.find_last_not_of(" \t\r\n") + 1);
+                if (!line.empty() && fs::exists(line)) {
+                    auto sz = fs::file_size(line);
+                    fs::path p(line);
+                    // Use filename (data.rom) if path ends with it, otherwise use parent dir
+                    std::string game_name;
+                    if (p.filename().string() == "data.rom") {
+                        game_name = p.parent_path().filename().string();
+                        if (game_name == "romfs" || game_name.empty()) {
+                            // Try grandparent (e.g. for eden/dump/01006A300BA2C000/romfs/data.rom)
+                            game_name = p.parent_path().parent_path().filename().string();
+                        }
+                    }
+                    if (game_name.empty()) game_name = p.filename().string();
+                    roms.push_back({line, game_name, sz});
+                }
+            }
+        }
+    }
+
+    // Deduplicate by path
+    std::sort(roms.begin(), roms.end(), [](const RomEntry& a, const RomEntry& b) {
+        return a.path < b.path;
+    });
+    roms.erase(std::unique(roms.begin(), roms.end(), [](const RomEntry& a, const RomEntry& b) {
+        return a.path == b.path;
+    }), roms.end());
+
+    return roms;
+}
+
+// Simple interactive ROM selector using SDL2 + OpenGL (no external GUI lib needed)
+static std::optional<std::string> select_rom_interactive(
+    const std::vector<RomEntry>& roms,
+    SDL_Window* window, SDL_GLContext ctx) {
+
+    // Use the already-initialized renderer
+    entergram::SpriteRenderer renderer;
+    // We need a simple way to render text. Use printf to stderr for now
+    // and handle keyboard input directly.
+
+    std::cerr << "\n=== ROM Selection Menu ===\n";
+    std::cerr << "Multiple data.rom files found. Select which to load:\n\n";
+    for (size_t i = 0; i < roms.size(); i++) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "  [%zu] %s (%.1f GB) - %s\n",
+                 i + 1, roms[i].name.c_str(),
+                 (double)roms[i].size / (1024.0 * 1024.0 * 1024.0),
+                 roms[i].path.c_str());
+        std::cerr << buf;
+    }
+    std::cerr << "\n  [0] Cancel / Quit\n";
+    std::cerr << "  Use mouse or type number (1-" << roms.size() << "): ";
+    std::cerr.flush();
+
+    SDL_Event e;
+    while (true) {
+        while (SDL_PollEvent(&e)) {
+            switch (e.type) {
+                case SDL_QUIT:
+                    return std::nullopt;
+                case SDL_KEYDOWN:
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        return std::nullopt;
+                    }
+                    if (e.key.keysym.sym >= SDLK_0 && e.key.keysym.sym <= SDLK_9) {
+                        int choice = e.key.keysym.sym - SDLK_0;
+                        if (choice == 0) return std::nullopt;
+                        if (choice >= 1 && (size_t)choice <= roms.size()) {
+                            std::cerr << "\nSelected: " << roms[choice - 1].path << "\n";
+                            return roms[choice - 1].path;
+                        }
+                    }
+                    if (e.key.keysym.sym >= SDLK_PLUS && e.key.keysym.sym <= SDLK_9) {
+                        // Numpad numbers
+                        int choice = e.key.keysym.sym - SDLK_PLUS + 1;
+                        if (choice == 10) choice = 0;
+                        if (choice == 0) return std::nullopt;
+                        if (choice >= 1 && (size_t)choice <= roms.size()) {
+                            std::cerr << "\nSelected: " << roms[choice - 1].path << "\n";
+                            return roms[choice - 1].path;
+                        }
+                    }
+                    if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_KP_ENTER) {
+                        // Default to first
+                        std::cerr << "\nSelected: " << roms[0].path << "\n";
+                        return roms[0].path;
+                    }
+                    break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+
+// =============================================================================
+// main
+// =============================================================================
 int main(int argc, char* argv[]) {
     bool list_mode = false;
     std::string rom_path;
@@ -619,96 +776,56 @@ int main(int argc, char* argv[]) {
     }
 
     if (rom_path.empty() && !list_mode) {
-        // Auto-search for data.rom in common locations
-        std::cerr << "No ROM path specified, searching for data.rom...\n";
-        namespace fs = std::filesystem;
-
-        std::vector<std::string> search_paths;
-
-        #ifdef _WIN32
-        // Get executable directory
-        char exe_path[MAX_PATH];
-        DWORD len = GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-        if (len > 0) {
-            fs::path exe_dir = fs::path(exe_path).parent_path();
-
-            // 1. Read roms.txt first (highest priority - user configured)
-            fs::path roms_txt = exe_dir / "roms.txt";
-            if (fs::exists(roms_txt)) {
-                std::ifstream f(roms_txt);
-                std::string line;
-                while (std::getline(f, line)) {
-                    line.erase(0, line.find_first_not_of(" \t\r\n"));
-                    line.erase(line.find_last_not_of(" \t\r\n") + 1);
-                    if (!line.empty()) {
-                        search_paths.push_back(line);
-                    }
-                }
-            }
-
-            // 2. games/<name>/data.rom - auto-discovered game folders
-            fs::path games_dir = exe_dir / "games";
-            if (fs::exists(games_dir) && fs::is_directory(games_dir)) {
-                for (const auto& game_entry : fs::directory_iterator(games_dir)) {
-                    if (game_entry.is_directory()) {
-                        fs::path candidate = game_entry.path() / "data.rom";
-                        if (fs::exists(candidate)) {
-                            search_paths.push_back(candidate.string());
-                        }
-                    }
-                }
-            }
-
-            // 3. data.rom in exe dir (fallback)
-            search_paths.push_back((exe_dir / "data.rom").string());
-        }
-        #else
-        // Read roms.txt from current dir
-        if (fs::exists("roms.txt")) {
-            std::ifstream f("roms.txt");
-            std::string line;
-            while (std::getline(f, line)) {
-                line.erase(0, line.find_first_not_of(" \t\r\n"));
-                line.erase(line.find_last_not_of(" \t\r\n") + 1);
-                if (!line.empty()) {
-                    search_paths.push_back(line);
-                }
-            }
-        }
-        // games/<name>/data.rom
-        if (fs::exists("games") && fs::is_directory("games")) {
-            for (const auto& game_entry : fs::directory_iterator("games")) {
-                if (game_entry.is_directory()) {
-                    fs::path candidate = game_entry.path() / "data.rom";
-                    if (fs::exists(candidate)) {
-                        search_paths.push_back(candidate.string());
-                    }
-                }
-            }
-        }
-        search_paths.push_back("data.rom");
-        #endif
-
-
-        for (const auto& p : search_paths) {
-            if (fs::exists(p)) {
-                rom_path = p;
-                break;
-            }
-        }
-
-        if (rom_path.empty()) {
+        // Scan for all ROMs in known locations
+        auto roms = scan_all_roms();
+        
+        if (roms.empty()) {
             std::cerr << "No data.rom found.\n";
             std::cerr << "Usage: " << argv[0] << " <path_to_data.rom>\n";
-            std::cerr << "Or place data.rom next to the emulator, or in games/<juego>/data.rom\n";
+            std::cerr << "Or place data.rom next to the emulator, in games/<juego>/, or in roms.txt\n";
             return 1;
         }
-        // Show which game was detected
-        if (rom_path.find("games/") != std::string::npos) {
-            fs::path p(rom_path);
-            std::cerr << "Game: " << p.parent_path().filename().string() << "\n";
+
+        if (roms.size() == 1) {
+            // Single ROM found - use it directly
+            rom_path = roms[0].path;
+            std::cerr << "Found: " << rom_path << "\n";
+        } else {
+            // Multiple ROMs found - show interactive menu
+            std::cerr << "Found " << roms.size() << " ROMs:\n";
+            for (size_t i = 0; i < roms.size(); i++) {
+                std::cerr << "  [" << (i + 1) << "] " << roms[i].name 
+                          << " (" << (double)roms[i].size / (1024.0*1024.0*1024.0) << " GB)\n";
+            }
+            std::cerr << "Select ROM (1-" << roms.size() << "), 0 to cancel: ";
+            std::cerr.flush();
+
+            // Read from stdin (terminal or piped)
+            std::cerr.flush();
+            std::string input;
+            if (std::getline(std::cin, input)) {
+                try {
+                    int choice = std::stoi(input);
+                    if (choice == 0) {
+                        std::cerr << "Cancelled.\n";
+                        return 1;
+                    }
+                    if (choice > 0 && choice <= (int)roms.size()) {
+                        rom_path = roms[choice - 1].path;
+                        std::cerr << "Selected: " << rom_path << "\n";
+                    } else {
+                        rom_path = roms[0].path;
+                        std::cerr << "Invalid choice, using: " << rom_path << "\n";
+                    }
+                } catch (...) {
+                    rom_path = roms[0].path;
+                    std::cerr << "Using: " << rom_path << "\n";
+                }
+            } else {
+                rom_path = roms[0].path;
+                std::cerr << "Using: " << rom_path << "\n";
+            }
         }
-        std::cerr << "Found: " << rom_path << "\n";
     }
 
 #if WITH_SDL2
