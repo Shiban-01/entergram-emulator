@@ -163,16 +163,21 @@ std::optional<RgbaFrame> VideoPlayer::read_frame() {
     av_init_packet(&packet);
 
     bool decoded_frame = false;
-    // Process packets one at a time until we get a video frame or hit EOF
-    // (This is called repeatedly by the caller for frame-by-frame timing)
-    while (!impl_->eof && !decoded_frame) {
+    bool got_packet = false;
+    // Process up to 10 packets per call (avoids consuming entire file)
+    // Each call tries to find a video frame; if not found, returns nullopt
+    // and the caller will retry next frame
+    int packets_tried = 0;
+    const int max_packets = 10;
+    while (!impl_->eof && !decoded_frame && packets_tried < max_packets) {
+        packets_tried++;
         int ret = av_read_frame(impl_->format_ctx, &packet);
-        if (ret == AVERROR_EOF || ret < 0) {
-            impl_->eof = true;
+            if (ret == AVERROR_EOF || ret < 0) {
+                impl_->eof = true;
             av_packet_unref(&packet);
             break;
         }
-
+        got_packet = true;
         if (packet.stream_index == impl_->video_stream_index) {
             ret = avcodec_send_packet(impl_->codec_ctx, &packet);
             if (ret >= 0) {
@@ -180,15 +185,13 @@ std::optional<RgbaFrame> VideoPlayer::read_frame() {
                 if (ret == 0) {
                     decoded_frame = true;
                 } else if (ret == AVERROR(EAGAIN)) {
-                    // Need more packets next time - break and try next call
-                    // This prevents consuming the entire file in one call
                     break;
                 } else if (ret == AVERROR_EOF) {
                     impl_->eof = true;
                 }
             }
         }
-        av_packet_unref(&packet);
+        if (got_packet) av_packet_unref(&packet);
     }
 
     if (!decoded_frame) {
@@ -263,6 +266,33 @@ double VideoPlayer::frame_rate() const {
     return 30.0;
 }
 
+double VideoPlayer::duration_seconds() const {
+    if (!impl_->format_ctx || impl_->video_stream_index < 0) return 0.0;
+    AVStream* stream = impl_->format_ctx->streams[impl_->video_stream_index];
+    
+    // Method 1: stream duration
+    if (stream->duration != AV_NOPTS_VALUE) {
+        AVRational tb = stream->time_base;
+        return static_cast<double>(stream->duration) * tb.num / tb.den;
+    }
+    
+    // Method 2: container duration
+    if (impl_->format_ctx->duration != AV_NOPTS_VALUE && impl_->format_ctx->duration > 0) {
+        return static_cast<double>(impl_->format_ctx->duration) / AV_TIME_BASE;
+    }
+    
+    // Method 3: estimate from nb_frames (if available via metadata)
+    if (stream->nb_frames > 0) {
+        AVRational fps = av_guess_frame_rate(
+            impl_->format_ctx, stream, nullptr);
+        if (fps.den > 0 && fps.num > 0) {
+            return static_cast<double>(stream->nb_frames) * fps.den / fps.num;
+        }
+    }
+    
+    return 0.0;
+}
+
 void VideoPlayer::pause() { impl_->paused = true; }
 void VideoPlayer::resume() { impl_->paused = false; }
 
@@ -271,10 +301,19 @@ void VideoPlayer::seek(double timestamp_seconds) {
     AVRational time_base = impl_->format_ctx->streams[impl_->video_stream_index]->time_base;
     int64_t seek_target = static_cast<int64_t>(timestamp_seconds *
         static_cast<double>(time_base.den) / time_base.num);
-    av_seek_frame(impl_->format_ctx, impl_->video_stream_index, seek_target, AVSEEK_FLAG_BACKWARD);
+    // Use av_seek_frame without AVSEEK_FLAG_BACKWARD to seek to exact position
+    // AVSEEK_FLAG_BACKWARD can cause issues after audio extraction consumed packets
+    int ret = av_seek_frame(impl_->format_ctx, impl_->video_stream_index, 
+                            seek_target, 0);
+    if (ret < 0) {
+        // Fallback: try with BACKWARD flag
+        av_seek_frame(impl_->format_ctx, impl_->video_stream_index, 
+                      seek_target, AVSEEK_FLAG_BACKWARD);
+    }
     avcodec_flush_buffers(impl_->codec_ctx);
     impl_->eof = false;
     impl_->has_frame = false;
+    impl_->pending_frame = RgbaFrame{};
 }
 
 bool VideoPlayer::has_audio_stream() const {

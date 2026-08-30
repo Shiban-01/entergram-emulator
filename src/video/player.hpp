@@ -34,6 +34,7 @@ public:
     int width() const;
     int height() const;
     double frame_rate() const;
+    double duration_seconds() const;
 
     void pause();
     void resume();
