@@ -65,15 +65,25 @@ void test_decompress_back_reference() {
     compressed.push_back(0x30);     // length=3, distance low nibble=0
     compressed.push_back(0x03);     // distance = 0*256 + 3 = 3
 
-    // Actually the back reference logic in our code:
-    // length = (tag >> 4) + 1 = 3
+    // Our back reference logic:
+    // length = (tag >> 4) + 1 = 3 + 1 = 4
     // distance = (tag & 0x0F) * 256 + offset_lo = 0*256 + 3 = 3
-    // Copy 3 bytes from 3 positions back: "ABC"
+    // Copy 4 bytes from distance 3 → "ABCABCA" (but capped at uncompressed_size=6)
+    // Actually: output is "ABC" (3), back-ref copies 4 from dist 3: A,B,C,A → 7 total, stop at 6
+    // Result: "ABCACA" but we want "ABCABC"... let's test actual behavior
 
-    // Wait, we need more output bytes. Let me reconsider.
-    // Output after literals: "ABC" (3 bytes)
-    // Back reference: copy 3 bytes from distance 3 → "ABC"
-    // Total expected: "ABCABC" (6 bytes)
+    // Actually let's adjust: tag 0x20 → length = (0x20>>4)+1 = 2+1 = 3
+    // distance = (0x20 & 0x0F)*256 + 3 = 3
+    // Copy 3 bytes from dist 3: A,B,C → "ABCABC"
+    compressed.clear();
+    compressed.push_back(0x00);     // Literal tag
+    compressed.push_back(0x03);     // 3 bytes
+    compressed.push_back('A');
+    compressed.push_back('B');
+    compressed.push_back('C');
+    compressed.push_back(0x20);     // length=3 (0x20>>4=2, +1=3), distance low=0
+    compressed.push_back(0x03);     // distance = 3
+    // Output: "ABC" + 3 bytes from dist 3 = "ABCABC" (6 bytes)
 
     auto result = Snr0Parser::decompress(compressed.data(), compressed.size(), 6);
     assert(result.size() == 6);
@@ -84,7 +94,8 @@ void test_decompress_back_reference() {
 
 void test_parse_stored_uncompressed() {
     // Create a valid SNR0 file with stored (uncompressed) data
-    std::vector<uint8_t> file_data(20 + 5, 0);
+    // SNR0 header is 20 bytes: magic(4), version(4), comp_size(4), uncomp_size(4), decomp_offset(4)
+    std::vector<uint8_t> file_data(25, 0);
     uint32_t magic = 0x30524E53;
     std::memcpy(file_data.data(), &magic, 4);
     uint32_t version = 1;
@@ -94,7 +105,7 @@ void test_parse_stored_uncompressed() {
     uint32_t uncomp_size = 5;
     std::memcpy(&file_data[12], &uncomp_size, 4);
     uint32_t decomp_offset = 20;
-    std::memcpy(&file_data[16], &decomp_offset, 4);
+    std::memcpy(&file_data[16], &decomp_offset, 4);  // field_10 = data offset = 20
     // Data at offset 20: "HELLO"
     std::memcpy(&file_data[20], "HELLO", 5);
 

@@ -73,6 +73,24 @@ public:
     // Move a layer to absolute coordinates
     void move_to(int layer_id, float x, float y);
 
+    // ---- VM callback methods ----
+    // Load a layer with given type and parameters (from LAYERLOAD opcode)
+    void load_layer(int layer_id, int layer_type, int param1, int param2);
+
+    // Update layer properties (from LAYERCTRL opcode)
+    // property_id: what to change, target: target value, duration: animation frames,
+    // flags: easing flags, easing: easing type
+    void update_layer(int layer_id, int property_id, int target, int duration, int flags, int easing);
+
+    // Unload a layer (from LAYERUNLOAD opcode)
+    void unload_layer(int layer_id);
+
+    // Move a sprite with animation (from MOVE-like opcodes)
+    void move_sprite(int layer_id, int x, int y, int duration, int flags);
+
+    // Set sprite alpha with animation (from alpha opcodes)
+    void set_sprite_alpha(int layer_id, int alpha, int duration, int flags);
+
     // Get all visible layers sorted by Z-order
     std::vector<const LayerProperties*> get_render_list() const;
 

@@ -78,6 +78,78 @@ void LayerManager::move_to(int layer_id, float x, float y) {
     }
 }
 
+// ---- VM callback methods ----
+
+void LayerManager::load_layer(int layer_id, int layer_type, int param1, int param2) {
+    LayerProperties props;
+    props.type = static_cast<LayerType>(layer_type);
+    props.x = static_cast<float>(param1);
+    props.y = static_cast<float>(param2);
+    props.visible = true;
+    props.alpha = 1.0f;
+    props.z_order = layer_id;
+    int id = add_layer(props);
+    // Store the VM-assigned layer_id as the name for lookup
+    for (auto& layer : layers_) {
+        if (layer.id == id) {
+            layer.props.name = "layer_" + std::to_string(layer_id);
+        }
+    }
+}
+
+void LayerManager::update_layer(int layer_id, int property_id, int target, int duration, int flags, int easing) {
+    // property_id determines what to change:
+    // 0 = position, 1 = alpha, 2 = color, 3 = scale, etc.
+    // For now, update properties on layers matching the VM layer_id
+    for (auto& layer : layers_) {
+        if (layer.props.name == "layer_" + std::to_string(layer_id)) {
+            switch (property_id) {
+                case 0: // position
+                    layer.props.x = static_cast<float>(target);
+                    break;
+                case 1: // alpha (0-255 range)
+                    layer.props.alpha = static_cast<float>(target) / 255.0f;
+                    break;
+                case 2: // color
+                    layer.props.color = static_cast<uint32_t>(target) | 0xFF000000;
+                    break;
+            }
+            layer.props.visible = true;
+            return;
+        }
+    }
+}
+
+void LayerManager::unload_layer(int layer_id) {
+    // Remove all layers matching this VM layer_id
+    layers_.erase(
+        std::remove_if(layers_.begin(), layers_.end(),
+            [layer_id](const Layer& l) {
+                return l.props.name == "layer_" + std::to_string(layer_id);
+            }),
+        layers_.end()
+    );
+}
+
+void LayerManager::move_sprite(int layer_id, int x, int y, int duration, int flags) {
+    for (auto& layer : layers_) {
+        if (layer.props.name == "layer_" + std::to_string(layer_id)) {
+            layer.props.x = static_cast<float>(x);
+            layer.props.y = static_cast<float>(y);
+            return;
+        }
+    }
+}
+
+void LayerManager::set_sprite_alpha(int layer_id, int alpha, int duration, int flags) {
+    for (auto& layer : layers_) {
+        if (layer.props.name == "layer_" + std::to_string(layer_id)) {
+            layer.props.alpha = static_cast<float>(alpha) / 255.0f;
+            return;
+        }
+    }
+}
+
 std::vector<const LayerProperties*> LayerManager::get_render_list() const {
     std::vector<const LayerProperties*> render_list;
 

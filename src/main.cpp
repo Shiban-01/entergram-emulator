@@ -24,6 +24,8 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <map>
+#include <iomanip>
 #ifdef _WIN32
     #include <windows.h>
     #include <io.h>
@@ -75,6 +77,11 @@ public:
     void on_choice(const std::vector<std::string>& options) override;
     void on_system_call(uint32_t code, const std::string& data) override;
     void on_wait(int frames) override;
+    void on_layer_load(int layer_id, int layer_type, int param1, int param2) override;
+    void on_layer_ctrl(int layer_id, int property_id, int target, int duration, int flags, int easing) override;
+    void on_layer_unload(int layer_id) override;
+    void on_sprite_move(int layer_id, int x, int y, int duration, int flags) override;
+    void on_sprite_alpha(int layer_id, int alpha, int duration, int flags) override;
 };
 
 // Game engine -- coordinates ROM, VM, renderer, video player, and audio
@@ -106,6 +113,13 @@ public:
     void display_text(const std::string& text, const std::string& character_name);
     void wait_frames(int frames);
 
+    // Layer/sprite callbacks from VM opcodes
+    void on_layer_load(int layer_id, int layer_type, int param1, int param2);
+    void on_layer_ctrl(int layer_id, int property_id, int target, int duration, int flags, int easing);
+    void on_layer_unload(int layer_id);
+    void on_sprite_move(int layer_id, int x, int y, int duration, int flags);
+    void on_sprite_alpha(int layer_id, int alpha, int duration, int flags);
+
     // Video
     bool extract_intro_video();
     void render_video_frame();
@@ -126,6 +140,8 @@ private:
     entergram::InputManager input_manager_;
     entergram::AudioPlayer audio_player_;
     std::vector<uint8_t> current_script_;
+    const std::vector<uint8_t>* current_script_file_data_ = nullptr;
+    std::optional<entergram::ExtractedFile> current_snr_file_;
     int wait_frames_remaining_ = 0;
     std::string intro_video_path_;
     entergram::Texture video_texture_;
@@ -161,6 +177,41 @@ void GameCallbacks::on_text_display(const std::string& text, const std::string& 
 void GameCallbacks::on_choice(const std::vector<std::string>& options) { (void)options; }
 void GameCallbacks::on_system_call(uint32_t code, const std::string& data) { (void)code; (void)data; }
 void GameCallbacks::on_wait(int frames) { if (engine) engine->wait_frames(frames); }
+void GameCallbacks::on_layer_load(int layer_id, int layer_type, int param1, int param2) {
+    if (engine) engine->on_layer_load(layer_id, layer_type, param1, param2);
+}
+void GameCallbacks::on_layer_ctrl(int layer_id, int property_id, int target, int duration, int flags, int easing) {
+    if (engine) engine->on_layer_ctrl(layer_id, property_id, target, duration, flags, easing);
+}
+void GameCallbacks::on_layer_unload(int layer_id) {
+    if (engine) engine->on_layer_unload(layer_id);
+}
+void GameCallbacks::on_sprite_move(int layer_id, int x, int y, int duration, int flags) {
+    if (engine) engine->on_sprite_move(layer_id, x, y, duration, flags);
+}
+void GameCallbacks::on_sprite_alpha(int layer_id, int alpha, int duration, int flags) {
+    if (engine) engine->on_sprite_alpha(layer_id, alpha, duration, flags);
+}
+
+void GameEngine::on_layer_load(int layer_id, int layer_type, int param1, int param2) {
+    layer_manager_.load_layer(layer_id, layer_type, param1, param2);
+}
+
+void GameEngine::on_layer_ctrl(int layer_id, int property_id, int target, int duration, int flags, int easing) {
+    layer_manager_.update_layer(layer_id, property_id, target, duration, flags, easing);
+}
+
+void GameEngine::on_layer_unload(int layer_id) {
+    layer_manager_.unload_layer(layer_id);
+}
+
+void GameEngine::on_sprite_move(int layer_id, int x, int y, int duration, int flags) {
+    layer_manager_.move_sprite(layer_id, x, y, duration, flags);
+}
+
+void GameEngine::on_sprite_alpha(int layer_id, int alpha, int duration, int flags) {
+    layer_manager_.set_sprite_alpha(layer_id, alpha, duration, flags);
+}
 
 bool GameEngine::load_script(const std::string& script_path) {
     auto file = rom_.extract_file(script_path);
@@ -170,14 +221,22 @@ bool GameEngine::load_script(const std::string& script_path) {
     }
 
     if (entergram::Snr0Parser::is_valid_snr0(file->data)) {
-        current_script_ = entergram::Snr0Parser::parse(file->data);
-        if (current_script_.empty()) {
+        // Store the file data so it persists for string resolution by the VM
+        current_snr_file_ = *file;
+        auto parsed = entergram::Snr0Parser::parse_full(current_snr_file_->data);
+        if (parsed.bytecode.empty()) {
             std::cerr << "ERROR: Failed to parse " << script_path << "\n";
             return false;
         }
+        current_script_ = parsed.bytecode;
+        current_script_file_data_ = &current_snr_file_->data;
+        // Pass file data + offsets so the VM can resolve string references
+        vm_.set_file_data(&current_snr_file_->data, parsed.bytecode_start, parsed.string_table_offset);
     } else {
         // Unknown format: use file data directly
-        current_script_ = file->data;
+        current_snr_file_ = *file;
+        current_script_ = current_snr_file_->data;
+        current_script_file_data_ = &current_snr_file_->data;
     }
 
     vm_.load_script(current_script_);
@@ -465,7 +524,15 @@ void GameEngine::handle_input() {
                 if (e.key.keysym.sym == SDLK_ESCAPE) state_ = GameState::Shutdown;
                 if (e.key.keysym.sym == SDLK_SPACE) {
                     if (state_ == GameState::IntroVideo) {
+                        // Skip intro: stop audio, close video, clean up, go to menu
+                        audio_player_.stop();
+                        video_player_.close();
+                        if (!intro_video_path_.empty()) {
+                            std::remove(intro_video_path_.c_str());
+                        }
                         state_ = GameState::MainMenu;
+                        std::cout << "Intro skipped by user\n";
+                        std::cout.flush();
                     }
                 }
                 break;
@@ -477,14 +544,27 @@ void GameEngine::handle_input() {
 void GameEngine::render() {
 #if WITH_SDL2
     // For intro video, frames are rendered in update_video()
-    if (state_ != GameState::IntroVideo) {
-        renderer_.clear(0.0f, 0.0f, 0.0f, 1.0f);
+    if (state_ == GameState::IntroVideo) {
+        return;  // Video frames rendered via render_video_frame()
+    }
+
+    // Clear to background color
+    renderer_.clear(0.05f, 0.05f, 0.10f, 1.0f);
+
+    if (state_ == GameState::MainMenu || state_ == GameState::Novel) {
+        // Render layers (sprites/backgrounds loaded by VM)
         auto render_list = layer_manager_.get_render_list();
         for (const auto* props : render_list) {
+            // TODO: Implement full sprite rendering once TXA loader is in place.
+            // For now, render a placeholder colored quad for visible layers.
             (void)props;
         }
-        SDL_GL_SwapWindow(window_);
+
+        // Render VM-managed text (dialogue) if any
+        // TODO: Implement text rendering once font loader is in place.
     }
+
+    SDL_GL_SwapWindow(window_);
 #endif
 }
 
@@ -798,6 +878,8 @@ static std::optional<std::string> select_rom_interactive(
 // =============================================================================
 int main(int argc, char* argv[]) {
     bool list_mode = false;
+    bool dump_mode = false;
+    std::string dump_snr = "main.snr";
     std::string rom_path;
 
     // Parse args
@@ -805,12 +887,19 @@ int main(int argc, char* argv[]) {
         std::string arg(argv[i]);
         if (arg == "--list" || arg == "-l") {
             list_mode = true;
+        } else if (arg == "--dump" || arg.substr(0, 7) == "--dump=") {
+            dump_mode = true;
+            if (arg.substr(0, 7) == "--dump=") dump_snr = arg.substr(7);
+        } else if (arg.substr(0, 9) == "--extract") {
+            dump_mode = true;
+            if (arg == "--extract") dump_snr = "main.snr";
+            else dump_snr = arg.substr(10);  // --extract=path
         } else {
             rom_path = arg;
         }
     }
 
-    if (rom_path.empty() && !list_mode) {
+    if (rom_path.empty() && !list_mode && !dump_mode) {
         // Scan for all ROMs in known locations
         auto roms = scan_all_roms();
         
@@ -864,6 +953,28 @@ int main(int argc, char* argv[]) {
     }
 
 #if WITH_SDL2
+    if (dump_mode) {
+        entergram::RomReader rom;
+        if (!rom.open(rom_path) || !rom.parse()) {
+            std::cerr << "Cannot open ROM\n";
+            return 1;
+        }
+        auto file = rom.extract_file(dump_snr);
+        if (!file) {
+            std::cerr << "Cannot extract " << dump_snr << "\n";
+            return 1;
+        }
+        // Save to disk
+        std::string out_name = dump_snr;
+        std::replace(out_name.begin(), out_name.end(), '/', '_');
+        std::ofstream out(out_name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(file->data.data()), file->data.size());
+        out.close();
+        std::cerr << "Extracted " << dump_snr << " -> " << out_name << " ("
+                  << file->data.size() << " bytes)\n";
+        return 0;
+    }
+
     GameEngine engine;
     if (!engine.initialize(rom_path, list_mode)) {
         return 1;
