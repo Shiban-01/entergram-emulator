@@ -35,6 +35,7 @@ struct VideoPlayer::Impl {
     bool paused = false;
     bool has_frame = false;
     RgbaFrame pending_frame;
+    int frames_decoded = 0;
 
     ~Impl() { close(); }
 
@@ -51,6 +52,7 @@ struct VideoPlayer::Impl {
         paused = false;
         has_frame = false;
         pix_fmt = AV_PIX_FMT_NONE;
+        frames_decoded = 0;
     }
 };
 
@@ -116,14 +118,12 @@ bool VideoPlayer::open(const std::string& file_path) {
         return false;
     }
 
-    // Use codec context's actual output format (more reliable than codecpar)
-    impl_->pix_fmt = impl_->codec_ctx->pix_fmt;
+    // Use codecpar's format for sws_context — codec_ctx->pix_fmt may not be
+    // set correctly until after first avcodec_receive_frame
+    impl_->pix_fmt = static_cast<AVPixelFormat>(video_stream->codecpar->format);
     if (impl_->pix_fmt == AV_PIX_FMT_NONE) {
         impl_->pix_fmt = AV_PIX_FMT_YUV420P;
     }
-    printf("Video stream: %dx%d, pix_fmt=%d, codec=%d\n",
-           impl_->codec_ctx->width, impl_->codec_ctx->height,
-           (int)impl_->pix_fmt, (int)video_stream->codecpar->codec_id);
 
     impl_->frame = av_frame_alloc();
     impl_->rgba_frame = av_frame_alloc();
@@ -147,6 +147,8 @@ bool VideoPlayer::open(const std::string& file_path) {
     }
 
     impl_->has_frame = false;
+    impl_->eof = false;
+    impl_->frames_decoded = 0;
     return true;
 }
 
@@ -163,21 +165,17 @@ std::optional<RgbaFrame> VideoPlayer::read_frame() {
     av_init_packet(&packet);
 
     bool decoded_frame = false;
-    bool got_packet = false;
-    // Process up to 10 packets per call (avoids consuming entire file)
-    // Each call tries to find a video frame; if not found, returns nullopt
-    // and the caller will retry next frame
     int packets_tried = 0;
-    const int max_packets = 10;
+    const int max_packets = 50;  // Scan up to 50 packets to find next video frame
     while (!impl_->eof && !decoded_frame && packets_tried < max_packets) {
         packets_tried++;
         int ret = av_read_frame(impl_->format_ctx, &packet);
-            if (ret == AVERROR_EOF || ret < 0) {
-                impl_->eof = true;
+        if (ret == AVERROR_EOF || ret < 0) {
+            impl_->eof = true;
             av_packet_unref(&packet);
             break;
         }
-        got_packet = true;
+
         if (packet.stream_index == impl_->video_stream_index) {
             ret = avcodec_send_packet(impl_->codec_ctx, &packet);
             if (ret >= 0) {
@@ -185,25 +183,37 @@ std::optional<RgbaFrame> VideoPlayer::read_frame() {
                 if (ret == 0) {
                     decoded_frame = true;
                 } else if (ret == AVERROR(EAGAIN)) {
-                    break;
+                    // Need more packets - continue reading
                 } else if (ret == AVERROR_EOF) {
                     impl_->eof = true;
                 }
             }
+        } else {
+            // Non-video packet (audio, etc.) — skip
         }
-        if (got_packet) av_packet_unref(&packet);
+        av_packet_unref(&packet);
     }
 
+    // Diagnostic removed — silent return on no frame
     if (!decoded_frame) {
         return std::nullopt;
     }
 
+    // Update pix_fmt if codec changed it after first frame
+    if (impl_->frame->format != (int)impl_->pix_fmt) {
+        impl_->pix_fmt = static_cast<AVPixelFormat>(impl_->frame->format);
+        if (impl_->sws_ctx) sws_freeContext(impl_->sws_ctx);
+        impl_->sws_ctx = sws_getContext(
+            impl_->codec_ctx->width, impl_->codec_ctx->height, impl_->pix_fmt,
+            impl_->codec_ctx->width, impl_->codec_ctx->height, AV_PIX_FMT_RGBA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+    }
+
     // Convert YUV → RGBA using sws_scale
-    int dst_slice = sws_scale(impl_->sws_ctx,
+    sws_scale(impl_->sws_ctx,
         impl_->frame->data, impl_->frame->linesize, 0,
         impl_->codec_ctx->height,
         impl_->rgba_frame->data, impl_->rgba_frame->linesize);
-    printf("  sws_scale: %d slices converted\n", dst_slice);
 
     RgbaFrame result;
     result.width = impl_->codec_ctx->width;
@@ -220,14 +230,26 @@ std::optional<RgbaFrame> VideoPlayer::read_frame() {
 
     impl_->pending_frame = std::move(result);
     impl_->has_frame = true;
-
-    printf("  Frame decoded: %dx%d\n", result.width, result.height);
+    impl_->frames_decoded++;
 
     return std::nullopt;
 }
 
 bool VideoPlayer::is_eof() const {
-    return impl_->eof && !impl_->has_frame;
+    // EOF when av_read_frame returned EOF AND no pending frame
+    if (impl_->eof && !impl_->has_frame) {
+        return true;
+    }
+    // Also detect EOF when we've decoded all known frames
+    int64_t total = total_frames();
+    if (total > 0 && impl_->frames_decoded >= total) {
+        return true;
+    }
+    return false;
+}
+
+int VideoPlayer::frames_decoded_count() const {
+    return impl_->frames_decoded;
 }
 
 bool VideoPlayer::has_pending_frame() const {
@@ -269,19 +291,15 @@ double VideoPlayer::frame_rate() const {
 double VideoPlayer::duration_seconds() const {
     if (!impl_->format_ctx || impl_->video_stream_index < 0) return 0.0;
     AVStream* stream = impl_->format_ctx->streams[impl_->video_stream_index];
-    
-    // Method 1: stream duration
+
+    // Method 1: stream duration (video-specific)
     if (stream->duration != AV_NOPTS_VALUE) {
         AVRational tb = stream->time_base;
-        return static_cast<double>(stream->duration) * tb.num / tb.den;
+        double dur = static_cast<double>(stream->duration) * tb.num / tb.den;
+        if (dur > 0) return dur;
     }
-    
-    // Method 2: container duration
-    if (impl_->format_ctx->duration != AV_NOPTS_VALUE && impl_->format_ctx->duration > 0) {
-        return static_cast<double>(impl_->format_ctx->duration) / AV_TIME_BASE;
-    }
-    
-    // Method 3: estimate from nb_frames (if available via metadata)
+
+    // Method 2: estimate from nb_frames (video-specific)
     if (stream->nb_frames > 0) {
         AVRational fps = av_guess_frame_rate(
             impl_->format_ctx, stream, nullptr);
@@ -289,8 +307,46 @@ double VideoPlayer::duration_seconds() const {
             return static_cast<double>(stream->nb_frames) * fps.den / fps.num;
         }
     }
-    
+
+    // Method 3: container duration (fallback)
+    if (impl_->format_ctx->duration != AV_NOPTS_VALUE && impl_->format_ctx->duration > 0) {
+        return static_cast<double>(impl_->format_ctx->duration) / AV_TIME_BASE;
+    }
+
     return 0.0;
+}
+
+int64_t VideoPlayer::total_frames() const {
+    if (!impl_->format_ctx || impl_->video_stream_index < 0) return 0;
+    AVStream* stream = impl_->format_ctx->streams[impl_->video_stream_index];
+
+    // Method 1: nb_frames field (if FFmpeg populated it)
+    if (stream->nb_frames > 0) {
+        return (int64_t)stream->nb_frames;
+    }
+
+    // Method 2: estimate from stream duration (video-specific)
+    if (stream->duration != AV_NOPTS_VALUE) {
+        AVRational tb = stream->time_base;
+        double dur = static_cast<double>(stream->duration) * tb.num / tb.den;
+        AVRational fps = av_guess_frame_rate(impl_->format_ctx, stream, nullptr);
+        if (dur > 0 && fps.den > 0 && fps.num > 0) {
+            double rate = (double)fps.num / fps.den;
+            return (int64_t)(dur * rate);
+        }
+    }
+
+    // Method 3: fallback to duration_seconds() * fps
+    double dur = duration_seconds();
+    if (dur > 0) {
+        AVRational fps = av_guess_frame_rate(impl_->format_ctx, stream, nullptr);
+        if (fps.den > 0 && fps.num > 0) {
+            double rate = (double)fps.num / fps.den;
+            return (int64_t)(dur * rate);
+        }
+    }
+
+    return 0;
 }
 
 void VideoPlayer::pause() { impl_->paused = true; }
@@ -301,19 +357,18 @@ void VideoPlayer::seek(double timestamp_seconds) {
     AVRational time_base = impl_->format_ctx->streams[impl_->video_stream_index]->time_base;
     int64_t seek_target = static_cast<int64_t>(timestamp_seconds *
         static_cast<double>(time_base.den) / time_base.num);
-    // Use av_seek_frame without AVSEEK_FLAG_BACKWARD to seek to exact position
-    // AVSEEK_FLAG_BACKWARD can cause issues after audio extraction consumed packets
-    int ret = av_seek_frame(impl_->format_ctx, impl_->video_stream_index, 
+    int ret = av_seek_frame(impl_->format_ctx, impl_->video_stream_index,
                             seek_target, 0);
     if (ret < 0) {
         // Fallback: try with BACKWARD flag
-        av_seek_frame(impl_->format_ctx, impl_->video_stream_index, 
+        av_seek_frame(impl_->format_ctx, impl_->video_stream_index,
                       seek_target, AVSEEK_FLAG_BACKWARD);
     }
     avcodec_flush_buffers(impl_->codec_ctx);
     impl_->eof = false;
     impl_->has_frame = false;
     impl_->pending_frame = RgbaFrame{};
+    impl_->frames_decoded = 0;
 }
 
 bool VideoPlayer::has_audio_stream() const {
@@ -325,7 +380,7 @@ int VideoPlayer::audio_sample_rate() const {
     return impl_->format_ctx->streams[impl_->audio_stream_index]->codecpar->sample_rate;
 }
 
-std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch) {
+std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch, double max_duration_seconds) {
     std::vector<int16_t> result;
 
 #ifndef HAVE_SWRESAMPLE
@@ -336,6 +391,14 @@ std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch)
     if (impl_->audio_stream_index < 0 || !impl_->format_ctx) {
         return result;
     }
+
+    // Seek to beginning before reading audio — must reset demuxer state
+    // after video playback consumed packets from the file
+    av_seek_frame(impl_->format_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+    avcodec_flush_buffers(impl_->codec_ctx);
+    impl_->eof = false;
+    impl_->has_frame = false;
+    impl_->pending_frame = RgbaFrame{};
 
     AVStream* audio_stream = impl_->format_ctx->streams[impl_->audio_stream_index];
     const AVCodec* audio_codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
@@ -356,10 +419,6 @@ std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch)
         last_error_ = "Failed to open audio codec";
         return result;
     }
-
-    // NOTE: We seek audio stream to beginning but do NOT touch video codec state.
-    // The video read_frame() will seek back to start as needed.
-    // Just read audio packets from current position forward.
 
     // FFmpeg 6.x: use AVChannelLayout from codecpar->ch_layout
     AVChannelLayout in_ch_layout;
@@ -410,10 +469,9 @@ std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch)
     AVFrame* af = av_frame_alloc();
     AVPacket packet;
 
-    printf("  Audio: %d Hz, %d ch, format=%d\n",
-           audio_stream->codecpar->sample_rate,
-           audio_ctx->ch_layout.nb_channels,
-           (int)audio_stream->codecpar->format);
+    // Calculate max samples to extract (sync with video duration)
+    size_t max_samples = (size_t)(max_duration_seconds * target_sr * target_ch);
+    bool limit_audio = (max_duration_seconds > 0.0);
 
     while (true) {
         int ret = av_read_frame(impl_->format_ctx, &packet);
@@ -422,58 +480,72 @@ std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch)
         if (packet.stream_index == impl_->audio_stream_index) {
             if (avcodec_send_packet(audio_ctx, &packet) >= 0) {
                 while (avcodec_receive_frame(audio_ctx, af) == 0) {
-                    // Calculate output buffer size
-                    int max_samples = (int)av_rescale_rnd(
+                    int max_out = (int)av_rescale_rnd(
                         swr_get_delay(swr_ctx, audio_ctx->sample_rate) + af->nb_samples,
                         target_sr, audio_ctx->sample_rate, AV_ROUND_UP);
-                    std::vector<uint8_t> out_buf(max_samples * target_ch * 2);
+                    std::vector<uint8_t> out_buf(max_out * target_ch * 2);
                     uint8_t* out_ptrs[2];
                     if (target_ch == 1) {
                         out_ptrs[0] = out_buf.data();
                         out_ptrs[1] = nullptr;
                     } else {
                         out_ptrs[0] = out_buf.data();
-                        out_ptrs[1] = out_buf.data() + max_samples * 2;
+                        out_ptrs[1] = out_buf.data() + max_out * 2;
                     }
 
                     int samples_out = swr_convert(swr_ctx,
-                        out_ptrs, max_samples,
+                        out_ptrs, max_out,
                         (const uint8_t**)af->data, af->nb_samples);
 
                     if (samples_out > 0) {
                         const int16_t* pcm = reinterpret_cast<const int16_t*>(out_buf.data());
-                        result.insert(result.end(), pcm, pcm + samples_out * target_ch);
+                        size_t samples_to_add = (size_t)samples_out * target_ch;
+                        // Limit audio to video duration
+                        if (limit_audio && result.size() + samples_to_add > max_samples) {
+                            samples_to_add = max_samples > result.size() ? max_samples - result.size() : 0;
+                        }
+                        if (samples_to_add > 0) {
+                            result.insert(result.end(), pcm, pcm + samples_to_add);
+                        }
                     }
                 }
             }
         }
         av_packet_unref(&packet);
+
+        // Stop if we've extracted enough audio
+        if (limit_audio && result.size() >= max_samples) break;
     }
 
     // Drain
     avcodec_send_packet(audio_ctx, nullptr);
     while (avcodec_receive_frame(audio_ctx, af) == 0) {
-        int max_samples = (int)av_rescale_rnd(
+        int max_out = (int)av_rescale_rnd(
             swr_get_delay(swr_ctx, audio_ctx->sample_rate) + af->nb_samples,
             target_sr, audio_ctx->sample_rate, AV_ROUND_UP);
-        std::vector<uint8_t> out_buf(max_samples * target_ch * 2);
+        std::vector<uint8_t> out_buf(max_out * target_ch * 2);
         uint8_t* out_ptrs[2];
         if (target_ch == 1) {
             out_ptrs[0] = out_buf.data();
             out_ptrs[1] = nullptr;
         } else {
             out_ptrs[0] = out_buf.data();
-            out_ptrs[1] = out_buf.data() + max_samples * 2;
+            out_ptrs[1] = out_buf.data() + max_out * 2;
         }
-
         int samples_out = swr_convert(swr_ctx,
-            out_ptrs, max_samples,
+            out_ptrs, max_out,
             (const uint8_t**)af->data, af->nb_samples);
-
         if (samples_out > 0) {
             const int16_t* pcm = reinterpret_cast<const int16_t*>(out_buf.data());
-            result.insert(result.end(), pcm, pcm + samples_out * target_ch);
+            size_t samples_to_add = (size_t)samples_out * target_ch;
+            if (limit_audio && result.size() + samples_to_add > max_samples) {
+                samples_to_add = max_samples > result.size() ? max_samples - result.size() : 0;
+            }
+            if (samples_to_add > 0) {
+                result.insert(result.end(), pcm, pcm + samples_to_add);
+            }
         }
+        if (limit_audio && result.size() >= max_samples) break;
     }
 
     av_frame_free(&af);
@@ -482,12 +554,18 @@ std::vector<int16_t> VideoPlayer::extract_audio(double target_sr, int target_ch)
     av_channel_layout_uninit(&in_ch_layout);
     av_channel_layout_uninit(&out_ch_layout);
 
-    // Reset state for continued video playback
+    // Reset video state for playback — seek back to beginning
     impl_->eof = false;
     impl_->has_frame = false;
+    impl_->pending_frame = RgbaFrame{};
+    impl_->frames_decoded = 0;
 
-    printf("  Audio extracted: %zu samples (%zu bytes)\n",
-           result.size(), result.size() * sizeof(int16_t));
+    // Seek video back to beginning for playback
+    if (impl_->video_stream_index >= 0) {
+        av_seek_frame(impl_->format_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(impl_->codec_ctx);
+    }
+
     return result;
 }
 

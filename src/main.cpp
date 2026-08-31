@@ -158,8 +158,8 @@ void GameCallbacks::on_se_play(const std::string& file_name, int volume) { if (e
 void GameCallbacks::on_movie_play(const std::string& file_name) { if (engine) engine->play_movie(file_name); }
 void GameCallbacks::on_movie_stop() {}
 void GameCallbacks::on_text_display(const std::string& text, const std::string& name) { if (engine) engine->display_text(text, name); }
-void GameCallbacks::on_choice(const std::vector<std::string>& options) { printf("[CHOICE] %zu options\n", options.size()); }
-void GameCallbacks::on_system_call(uint32_t code, const std::string& data) { printf("[SYS] code=0x%x\n", code); }
+void GameCallbacks::on_choice(const std::vector<std::string>& options) { (void)options; }
+void GameCallbacks::on_system_call(uint32_t code, const std::string& data) { (void)code; (void)data; }
 void GameCallbacks::on_wait(int frames) { if (engine) engine->wait_frames(frames); }
 
 bool GameEngine::load_script(const std::string& script_path) {
@@ -212,20 +212,18 @@ bool GameEngine::extract_intro_video() {
                           << video_player_.height() << " @ "
                           << video_player_.frame_rate() << " fps\n";
 
-                // Extract audio from the video
+                // Extract audio from the video.
+                // Video and audio have the same duration in these MP4s.
                 if (video_player_.has_audio_stream()) {
-                    printf("  Extracting audio...\n");
-                    auto audio = video_player_.extract_audio();
+                    auto audio = video_player_.extract_audio(48000, 1, 0.0);
                     if (!audio.empty()) {
                         audio_player_.play_pcm(audio, 48000, 1);
-                        printf("  Audio: %zu samples playing\n", audio.size());
-                    }
-                    // Re-open video after audio extraction for clean seek/playback
-                    video_player_.close();
-                    if (video_player_.open(intro_video_path_)) {
-                        printf("  Video re-opened for playback\n");
                     }
                 }
+                // Re-open video file for clean playback after audio extraction
+                video_player_.close();
+                if (video_player_.open(intro_video_path_)) {
+                                    }
                 return true;
             }
         }
@@ -241,8 +239,6 @@ void GameEngine::render_video_frame() {
         if (frame && frame->valid()) {
             // Upload to texture and render as fullscreen quad
             video_texture_.upload(frame->width, frame->height, frame->data.data());
-            printf("[RENDER] Video texture uploaded: %dx%d, texture_id=%u\n",
-                   frame->width, frame->height, video_texture_.gl_texture_id());
             entergram::Sprite sprite;
             sprite.x = 0;
             sprite.y = 0;
@@ -276,64 +272,21 @@ void GameEngine::update_video() {
         return;
     }
 
-    static bool video_seeked = false;
-
-    static bool video_finished = false;
-
-    static bool video_reopened = false;
-
+    static bool video_started = false;
     static auto video_start = std::chrono::steady_clock::now();
-
     static int last_frame_index = -1;
 
-
-
-    // After audio extraction, the video stream position is at EOF.
-
-    // Re-open the video file for clean playback.
-
-    if (video_player_.is_eof() && !video_reopened) {
-
-        printf("[VIDEO] Video at EOF after audio extraction, re-opening\n");
-
-        video_player_.seek(0.0);
-
-        video_reopened = true;
-
-        video_seeked = true;
-
-        // Reset frame timing
-
+    // extract_audio() already seeked the video to position 0 for playback.
+    // On first call here, mark the video as started and reset timing.
+    if (!video_started) {
+        video_started = true;
         video_start = std::chrono::steady_clock::now();
-
         last_frame_index = -1;
-
-        printf("[VIDEO] Ready for playback\n");
-
-        fflush(stdout);
-
+        // Video was re-opened cleanly in extract_intro_video().
+        // No seek needed — freshly opened file starts at position 0.
     }
 
-    // If video re-opened, wait for it to reach EOF again (playback complete)
-
-    if (video_reopened && video_player_.is_eof() && !video_finished) {
-
-        video_finished = true;
-
-        state_ = GameState::MainMenu;
-
-        printf("Intro video finished, showing SELECT menu\n");
-
-        fflush(stdout);
-
-        std::remove(intro_video_path_.c_str());
-
-        return;
-
-    }
-
-
-    // Real-time frame scheduling using the video's frame rate
+    // Calculate elapsed time for frame scheduling AND as a timeout fallback
     double fps = video_player_.frame_rate();
     if (fps <= 0) fps = 29.97;
     double frame_duration_ms = 1000.0 / fps;
@@ -342,24 +295,41 @@ void GameEngine::update_video() {
     double elapsed_ms = std::chrono::duration<double, std::milli>(now - video_start).count();
     int target_frame = static_cast<int>(elapsed_ms / frame_duration_ms);
 
-    // Check if video playback is complete (either EOF or duration exceeded)
-    double video_duration = video_player_.duration_seconds();
+    // Check if video playback is complete:
+    // 1. FFmpeg reported EOF (av_read_frame returned AVERROR_EOF)
+    // 2. We've decoded all known frames (nb_frames-based detection)
+    // 3. Duration-based fallback if available
     bool video_done = video_player_.is_eof() && !video_player_.has_pending_frame();
-    if (!video_done && video_duration > 0) {
-        // Backup: if target_frame exceeds video duration, consider it done
-        double total_frames = video_duration * fps;
-        if (target_frame >= total_frames - 1) {
+
+    if (!video_done) {
+        int64_t total = video_player_.total_frames();
+        int decoded = video_player_.frames_decoded_count();
+        if (total > 0 && decoded >= total) {
             video_done = true;
         }
     }
-    // Final fallback: if video has played for more than 35 seconds, end it
-    // (intro videos are typically 20-30s; 35s covers most cases)
-    if (!video_done && elapsed_ms > 35000) {
-        printf("[VIDEO] Timeout (35s), going to menu\n");
+
+    // If duration is known, check against target frame
+    double video_duration = video_player_.duration_seconds();
+    if (!video_done && video_duration > 0) {
+        double total_frames_calc = video_duration * fps;
+        if (target_frame >= total_frames_calc - 1) {
+            video_done = true;
+        }
+    }
+    // Final fallback: if video has played longer than its known duration, end it.
+    // Entergram intro videos have video+audio of the same duration (~148s for
+    // Higurashi, ~120s for Umineko). Use 150s as a margin beyond 148s.
+    if (!video_done && elapsed_ms > 150000) {
+        printf("[VIDEO] Timeout (150s), going to menu\n");
         fflush(stdout);
         video_done = true;
     }
+
     if (video_done) {
+        // Stop audio and clean up video resources
+        audio_player_.stop();
+        video_player_.close();
         state_ = GameState::MainMenu;
         printf("Intro video finished, going to SELECT menu\n");
         fflush(stdout);
@@ -372,10 +342,8 @@ void GameEngine::update_video() {
         last_frame_index = target_frame;
 
         if (video_player_.has_pending_frame()) {
-            // Consume the buffered frame
             render_video_frame();
         } else {
-            // Decode next frame
             video_player_.read_frame();
             if (video_player_.has_pending_frame()) {
                 render_video_frame();
@@ -625,10 +593,8 @@ int GameEngine::run_sdl() {
 
         switch (state_) {
             case GameState::IntroVideo:
-                // Run VM in background (processes MOVIEPLAY/SYS callbacks)
-                if (vm_.is_running() && !vm_.is_waiting_for_voice()) {
-                    vm_.step(&callbacks_);
-                }
+                // Don't execute VM during intro video — let video play to
+                // completion, then VM takes over in MainMenu state.
                 update_video();
                 break;
             case GameState::MainMenu:

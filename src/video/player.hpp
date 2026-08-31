@@ -35,6 +35,9 @@ public:
     int height() const;
     double frame_rate() const;
     double duration_seconds() const;
+    int64_t total_frames() const;
+    int frames_decoded_count() const;
+    int64_t nb_frames() const;
 
     void pause();
     void resume();
@@ -42,7 +45,8 @@ public:
 
     // Audio extraction from video
     bool has_audio_stream() const;
-    std::vector<int16_t> extract_audio(double target_sample_rate = 48000, int target_channels = 1);
+    // Extract audio, optionally limited to max_duration_seconds (0 = no limit)
+    std::vector<int16_t> extract_audio(double target_sample_rate = 48000, int target_channels = 1, double max_duration_seconds = 0.0);
     int audio_sample_rate() const;
     std::string last_error() const { return last_error_; }
     bool has_error() const { return !last_error_.empty(); }

@@ -145,7 +145,6 @@ void SpriteRenderer::render(const Sprite& sprite, const Texture& texture) {
     GLint tex_loc = p_glGetUniformLocation(shader_program_, "uTexture");
     if (tex_loc >= 0) {
         p_glUniform1i(tex_loc, 0);
-        printf("[RENDER] texture unit=%d, texture_id=%u\n", 0, texture.gl_texture_id());
     }
     
     p_glBindVertexArray(vao_);
