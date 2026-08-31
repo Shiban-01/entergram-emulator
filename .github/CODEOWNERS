@@ -1,0 +1,15 @@
+# Code owners
+# Format: path owner
+
+* @Shiban-01
+
+# Core modules
+src/core/ @Shiban-01
+src/video/ @Shiban-01
+src/renderer/ @Shiban-01
+
+# Tests
+tests/ @Shiban-01
+
+# CI/CD
+.github/ @Shiban-01
